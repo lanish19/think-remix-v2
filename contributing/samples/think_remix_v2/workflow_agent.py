@@ -31,6 +31,7 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.agents.parallel_agent import ParallelAgent
 from google.adk.events.event import Event
 from google.adk.utils.context_utils import Aclosing
+from google.genai import types
 from typing_extensions import override
 
 from . import agent
@@ -93,32 +94,45 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     output_key = getattr(agent_instance, 'output_key', None)
     
     while retry_count <= max_retries:
+      # Collect text output from events
+      collected_text = []
+      
       # Run the agent
       async with Aclosing(agent_instance.run_async(ctx)) as agen:
-        last_event = None
         async for event in agen:
           yield event
-          last_event = event
+          # Collect text from event using ADK's event.text property
+          try:
+            event_text = event.text
+            if event_text:
+              collected_text.append(event_text)
+          except (AttributeError, Exception):
+            # Fallback: try to extract from content if text property not available
+            pass
       
       # If no output key, skip validation
       if not output_key:
         break
       
-      # Get the output from state
+      # Try to get output from state first (ADK stores it there)
       agent_output = ctx.state.get(output_key)
-      if agent_output is None:
-        logger.warning('No output found in state for key %s from agent %s',
+      output_text = None
+      
+      if agent_output is not None:
+        # Convert state output to string
+        if isinstance(agent_output, dict):
+          output_text = json.dumps(agent_output)
+        elif isinstance(agent_output, str):
+          output_text = agent_output
+        else:
+          output_text = str(agent_output)
+      elif collected_text:
+        # Fallback to collected text from events
+        output_text = '\n'.join(collected_text)
+      else:
+        logger.warning('No output found for key %s from agent %s (checked state and events)',
                       output_key, agent_instance.name)
         break
-      
-      # Convert to string if needed
-      if isinstance(agent_output, dict):
-        import json
-        output_text = json.dumps(agent_output)
-      elif isinstance(agent_output, str):
-        output_text = agent_output
-      else:
-        output_text = str(agent_output)
       
       # Validate output
       validation_result = validate_agent_output_by_key(
@@ -143,11 +157,27 @@ class ThinkRemixWorkflowAgent(BaseAgent):
         )
         # Add validation error to context for agent to see
         error_context = (
-            f'Previous output failed validation: {validation_result.error}. '
-            'Please ensure your output matches the required JSON schema exactly.'
+            f'VALIDATION ERROR: Your previous output failed schema validation. '
+            f'Error details: {validation_result.error}. '
+            'Please ensure your output matches the required JSON schema exactly. '
+            'Output ONLY valid JSON matching the schema - no markdown, no preamble, no commentary.'
         )
         # Store error in state so agent can access it
         ctx.state[f'{output_key}_validation_error'] = error_context
+        # Add validation error to the conversation so agent sees it on retry
+        # The agent will see this in its conversation history
+        if hasattr(ctx, 'session') and ctx.session:
+          try:
+            error_event = Event(
+                author='system',
+                content=types.Content(
+                    parts=[types.Part.from_text(error_context)]
+                ),
+            )
+            ctx.session.append_event(error_event)
+          except Exception:
+            # If we can't add to session, at least log it
+            logger.debug('Could not add validation error to session')
       else:
         logger.error(
             'Validation failed for agent %s after %d attempts: %s. Continuing anyway.',
@@ -389,16 +419,25 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     
     # Validate parallel agent outputs
     for sub_agent in [agent.synthesis_agent, agent.adversarial_injector_agent]:
-      if hasattr(sub_agent, 'output_key'):
-        output = ctx.state.get(sub_agent.output_key)
+      output_key = getattr(sub_agent, 'output_key', None)
+      if output_key:
+        output = ctx.state.get(output_key)
         if output:
-          output_text = json.dumps(output) if isinstance(output, dict) else str(output)
+          if isinstance(output, dict):
+            output_text = json.dumps(output)
+          elif isinstance(output, str):
+            output_text = output
+          else:
+            output_text = str(output)
           validation_result = validate_agent_output_by_key(
-              output_text, sub_agent.output_key, sub_agent.name
+              output_text, output_key, sub_agent.name
           )
           if not validation_result.valid:
             logger.warning('Validation failed for parallel agent %s: %s',
                           sub_agent.name, validation_result.error)
+        else:
+          logger.debug('No output found in state for parallel agent %s (key: %s)',
+                      sub_agent.name, output_key)
 
     # Analyze Disagreement
     async for event in self._run_agent_with_validation(
@@ -455,16 +494,25 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     
     # Validate parallel agent outputs
     for sub_agent in [agent.evidence_adjudicator_agent, agent.null_adjudicator_agent]:
-      if hasattr(sub_agent, 'output_key'):
-        output = ctx.state.get(sub_agent.output_key)
+      output_key = getattr(sub_agent, 'output_key', None)
+      if output_key:
+        output = ctx.state.get(output_key)
         if output:
-          output_text = json.dumps(output) if isinstance(output, dict) else str(output)
+          if isinstance(output, dict):
+            output_text = json.dumps(output)
+          elif isinstance(output, str):
+            output_text = output
+          else:
+            output_text = str(output)
           validation_result = validate_agent_output_by_key(
-              output_text, sub_agent.output_key, sub_agent.name
+              output_text, output_key, sub_agent.name
           )
           if not validation_result.valid:
             logger.warning('Validation failed for parallel agent %s: %s',
                           sub_agent.name, validation_result.error)
+        else:
+          logger.debug('No output found in state for parallel agent %s (key: %s)',
+                      sub_agent.name, output_key)
 
     # Case File
     async for event in self._run_agent_with_validation(
