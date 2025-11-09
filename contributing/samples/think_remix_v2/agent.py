@@ -29,17 +29,20 @@ from google.adk.tools.google_search_tool import GoogleSearchTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
+from .config_loader import get_config
 from .state_manager import StateManager
 from .state_manager import initialize_state
 from .state_manager import initialize_state_mapping
 from .workflow_agent import ThinkRemixWorkflowAgent
 
 
-SOURCE_CREDIBILITY_SCORES: dict[str, float] = {
-    'primary': 0.95,
-    'secondary': 0.75,
-    'tertiary': 0.55,
-}
+def _get_source_credibility_scores() -> dict[str, float]:
+  """Get source credibility scores from config."""
+  config = get_config()
+  return config.source_credibility_scores
+
+
+SOURCE_CREDIBILITY_SCORES: dict[str, float] = _get_source_credibility_scores()
 JSON_ONLY_WARNING = (
     'CRITICAL: Output ONLY valid JSON. No preamble, markdown, or commentary.'
 )

@@ -19,7 +19,10 @@ from __future__ import annotations
 import logging
 from typing import AsyncGenerator
 from typing import ClassVar
+from typing import Optional
 from typing import Type
+
+import json
 
 from google.adk.agents.base_agent import BaseAgent
 from google.adk.agents.base_agent import BaseAgentState
@@ -31,7 +34,9 @@ from google.adk.utils.context_utils import Aclosing
 from typing_extensions import override
 
 from . import agent
+from .config_loader import get_config
 from .state_manager import initialize_state_mapping
+from .validation import validate_agent_output_by_key
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +59,103 @@ class ThinkRemixWorkflowAgent(BaseAgent):
 
   config_type: ClassVar[Type[BaseAgentConfig]] = BaseAgentConfig
   """The config type for this agent."""
+  
+  def __init__(self, *args, **kwargs):
+    """Initialize workflow agent with configuration."""
+    super().__init__(*args, **kwargs)
+    self._config = get_config()
+  
+  @property
+  def max_validation_retries(self) -> int:
+    """Maximum number of retries for validation failures."""
+    return self._config.max_schema_validation_retries
+
+  async def _run_agent_with_validation(
+      self,
+      agent_instance: BaseAgent,
+      ctx: InvocationContext,
+      max_retries: Optional[int] = None,
+  ) -> AsyncGenerator[Event, None]:
+    """Runs an agent and validates its output with retry logic.
+    
+    Args:
+      agent_instance: The agent to run.
+      ctx: Invocation context.
+      max_retries: Maximum retry attempts (defaults to self.max_validation_retries).
+    
+    Yields:
+      Events from agent execution.
+    """
+    if max_retries is None:
+      max_retries = self.max_validation_retries
+    
+    retry_count = 0
+    output_key = getattr(agent_instance, 'output_key', None)
+    
+    while retry_count <= max_retries:
+      # Run the agent
+      async with Aclosing(agent_instance.run_async(ctx)) as agen:
+        last_event = None
+        async for event in agen:
+          yield event
+          last_event = event
+      
+      # If no output key, skip validation
+      if not output_key:
+        break
+      
+      # Get the output from state
+      agent_output = ctx.state.get(output_key)
+      if agent_output is None:
+        logger.warning('No output found in state for key %s from agent %s',
+                      output_key, agent_instance.name)
+        break
+      
+      # Convert to string if needed
+      if isinstance(agent_output, dict):
+        import json
+        output_text = json.dumps(agent_output)
+      elif isinstance(agent_output, str):
+        output_text = agent_output
+      else:
+        output_text = str(agent_output)
+      
+      # Validate output
+      validation_result = validate_agent_output_by_key(
+          output_text,
+          output_key,
+          agent_instance.name,
+      )
+      
+      if validation_result.valid:
+        logger.debug('Validation passed for agent %s', agent_instance.name)
+        break
+      
+      # Validation failed
+      if retry_count < max_retries:
+        retry_count += 1
+        logger.warning(
+            'Validation failed for agent %s (attempt %d/%d): %s. Retrying...',
+            agent_instance.name,
+            retry_count,
+            max_retries + 1,
+            validation_result.error,
+        )
+        # Add validation error to context for agent to see
+        error_context = (
+            f'Previous output failed validation: {validation_result.error}. '
+            'Please ensure your output matches the required JSON schema exactly.'
+        )
+        # Store error in state so agent can access it
+        ctx.state[f'{output_key}_validation_error'] = error_context
+      else:
+        logger.error(
+            'Validation failed for agent %s after %d attempts: %s. Continuing anyway.',
+            agent_instance.name,
+            max_retries + 1,
+            validation_result.error,
+        )
+        break
 
   @override
   async def _run_async_impl(
@@ -129,9 +231,10 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     workflow_state.phase = 'question_processing'
     
     # Question Audit Gate
-    async with Aclosing(agent.question_audit_agent.run_async(ctx)) as agen:
-      async for event in agen:
-        yield event
+    async for event in self._run_agent_with_validation(
+        agent.question_audit_agent, ctx
+    ):
+      yield event
 
     # Check audit result and branch
     audit_result = ctx.state.get('question_audit_result')
@@ -145,41 +248,46 @@ class ThinkRemixWorkflowAgent(BaseAgent):
         return
 
     # Analyze Question
-    async with Aclosing(agent.analyze_question_agent.run_async(ctx)) as agen:
-      async for event in agen:
-        yield event
+    async for event in self._run_agent_with_validation(
+        agent.analyze_question_agent, ctx
+    ):
+      yield event
 
     # Generate Null Hypotheses
-    async with Aclosing(agent.generate_nulls_agent.run_async(ctx)) as agen:
-      async for event in agen:
-        yield event
+    async for event in self._run_agent_with_validation(
+        agent.generate_nulls_agent, ctx
+    ):
+      yield event
 
     # Gather Insights (comprehensive research)
-    async with Aclosing(agent.gather_insights_agent.run_async(ctx)) as agen:
-      async for event in agen:
-        yield event
+    async for event in self._run_agent_with_validation(
+        agent.gather_insights_agent, ctx
+    ):
+      yield event
 
   async def _run_persona_allocation_phase(
       self,
       ctx: InvocationContext,
       workflow_state: ThinkRemixWorkflowState,
   ) -> AsyncGenerator[Event, None]:
-    """Phase 2: Persona allocation with validation loop (max 3 attempts)."""
+    """Phase 2: Persona allocation with validation loop."""
     workflow_state.phase = 'persona_allocation'
-    max_attempts = 3
+    max_attempts = self._config.max_persona_validator_attempts
 
     while workflow_state.persona_allocator_attempts < max_attempts:
       workflow_state.persona_allocator_attempts += 1
       
       # Run Persona Allocator
-      async with Aclosing(agent.persona_allocator_agent.run_async(ctx)) as agen:
-        async for event in agen:
-          yield event
+      async for event in self._run_agent_with_validation(
+          agent.persona_allocator_agent, ctx
+      ):
+        yield event
 
       # Run Persona Validator
-      async with Aclosing(agent.persona_validator_agent.run_async(ctx)) as agen:
-        async for event in agen:
-          yield event
+      async for event in self._run_agent_with_validation(
+          agent.persona_validator_agent, ctx
+      ):
+        yield event
 
       # Check validation result
       validation_result = ctx.state.get('persona_validation')
@@ -259,12 +367,14 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     workflow_state.phase = 'analysis'
     
     # Evidence Consistency Enforcer
-    async with Aclosing(agent.evidence_consistency_enforcer_agent.run_async(ctx)) as agen:
-      async for event in agen:
-        yield event
+    async for event in self._run_agent_with_validation(
+        agent.evidence_consistency_enforcer_agent, ctx
+    ):
+      yield event
 
     # Run Synthesis and Adversarial in parallel
     # ParallelAgent handles branching internally, so we can use the same ctx
+    # Note: Validation happens after parallel execution completes
     parallel_analysis_agent = ParallelAgent(
         name='parallel_synthesis_adversarial',
         sub_agents=[
@@ -276,16 +386,31 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     async with Aclosing(parallel_analysis_agent.run_async(ctx)) as agen:
       async for event in agen:
         yield event
+    
+    # Validate parallel agent outputs
+    for sub_agent in [agent.synthesis_agent, agent.adversarial_injector_agent]:
+      if hasattr(sub_agent, 'output_key'):
+        output = ctx.state.get(sub_agent.output_key)
+        if output:
+          output_text = json.dumps(output) if isinstance(output, dict) else str(output)
+          validation_result = validate_agent_output_by_key(
+              output_text, sub_agent.output_key, sub_agent.name
+          )
+          if not validation_result.valid:
+            logger.warning('Validation failed for parallel agent %s: %s',
+                          sub_agent.name, validation_result.error)
 
     # Analyze Disagreement
-    async with Aclosing(agent.analyze_disagreement_agent.run_async(ctx)) as agen:
-      async for event in agen:
-        yield event
+    async for event in self._run_agent_with_validation(
+        agent.analyze_disagreement_agent, ctx
+    ):
+      yield event
 
     # Analyze Blindspots
-    async with Aclosing(agent.analyze_blindspots_agent.run_async(ctx)) as agen:
-      async for event in agen:
-        yield event
+    async for event in self._run_agent_with_validation(
+        agent.analyze_blindspots_agent, ctx
+    ):
+      yield event
 
   async def _run_research_phase(
       self,
@@ -296,14 +421,16 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     workflow_state.phase = 'research'
     
     # Search Inquiry Strategist
-    async with Aclosing(agent.search_inquiry_strategist_agent.run_async(ctx)) as agen:
-      async for event in agen:
-        yield event
+    async for event in self._run_agent_with_validation(
+        agent.search_inquiry_strategist_agent, ctx
+    ):
+      yield event
 
     # Conduct Research (dual-track)
-    async with Aclosing(agent.conduct_research_agent.run_async(ctx)) as agen:
-      async for event in agen:
-        yield event
+    async for event in self._run_agent_with_validation(
+        agent.conduct_research_agent, ctx
+    ):
+      yield event
 
   async def _run_adjudication_phase(
       self,
@@ -325,11 +452,25 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     async with Aclosing(parallel_adjudication_agent.run_async(ctx)) as agen:
       async for event in agen:
         yield event
+    
+    # Validate parallel agent outputs
+    for sub_agent in [agent.evidence_adjudicator_agent, agent.null_adjudicator_agent]:
+      if hasattr(sub_agent, 'output_key'):
+        output = ctx.state.get(sub_agent.output_key)
+        if output:
+          output_text = json.dumps(output) if isinstance(output, dict) else str(output)
+          validation_result = validate_agent_output_by_key(
+              output_text, sub_agent.output_key, sub_agent.name
+          )
+          if not validation_result.valid:
+            logger.warning('Validation failed for parallel agent %s: %s',
+                          sub_agent.name, validation_result.error)
 
     # Case File
-    async with Aclosing(agent.case_file_agent.run_async(ctx)) as agen:
-      async for event in agen:
-        yield event
+    async for event in self._run_agent_with_validation(
+        agent.case_file_agent, ctx
+    ):
+      yield event
 
   async def _run_coverage_validation_phase(
       self,
@@ -338,15 +479,16 @@ class ThinkRemixWorkflowAgent(BaseAgent):
   ) -> AsyncGenerator[Event, None]:
     """Phase 7: Coverage validation loop (regenerate case file if needed)."""
     workflow_state.phase = 'coverage_validation'
-    max_attempts = 3
+    max_attempts = self._config.max_coverage_validator_attempts
 
     while workflow_state.coverage_validator_attempts < max_attempts:
       workflow_state.coverage_validator_attempts += 1
       
       # Run Coverage Validator
-      async with Aclosing(agent.coverage_validator_agent.run_async(ctx)) as agen:
-        async for event in agen:
-          yield event
+      async for event in self._run_agent_with_validation(
+          agent.coverage_validator_agent, ctx
+      ):
+        yield event
 
       # Check validation result
       validation_result = ctx.state.get('coverage_validation')
@@ -364,9 +506,10 @@ class ThinkRemixWorkflowAgent(BaseAgent):
           logger.info('Coverage validation failed, regenerating case file (attempt %d/%d)',
                       workflow_state.coverage_validator_attempts, max_attempts)
           # Regenerate case file
-          async with Aclosing(agent.case_file_agent.run_async(ctx)) as agen:
-            async for event in agen:
-              yield event
+          async for event in self._run_agent_with_validation(
+              agent.case_file_agent, ctx
+          ):
+            yield event
       else:
         # No validation result, proceed anyway
         logger.warning('No coverage validation result found, proceeding')
@@ -381,19 +524,22 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     workflow_state.phase = 'final'
     
     # Robustness Calculator
-    async with Aclosing(agent.robustness_calculator_agent.run_async(ctx)) as agen:
-      async for event in agen:
-        yield event
+    async for event in self._run_agent_with_validation(
+        agent.robustness_calculator_agent, ctx
+    ):
+      yield event
 
     # QA Agent
-    async with Aclosing(agent.qa_agent.run_async(ctx)) as agen:
-      async for event in agen:
-        yield event
+    async for event in self._run_agent_with_validation(
+        agent.qa_agent, ctx
+    ):
+      yield event
 
     # Final Arbiter
-    async with Aclosing(agent.final_arbiter_agent.run_async(ctx)) as agen:
-      async for event in agen:
-        yield event
+    async for event in self._run_agent_with_validation(
+        agent.final_arbiter_agent, ctx
+    ):
+      yield event
 
   @override
   async def _run_live_impl(
