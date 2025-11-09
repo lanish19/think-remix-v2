@@ -30,6 +30,7 @@ from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
 from .config_loader import get_config
+from .perplexity_tool import perplexity_search_tool
 from .state_manager import StateManager
 from .state_manager import initialize_state
 from .state_manager import initialize_state_mapping
@@ -90,7 +91,19 @@ FRAMEWORK_REQUIREMENTS: dict[str, str] = {
     ),
 }
 
-SEARCH_TOOL = GoogleSearchTool(bypass_multi_tools_limit=True)
+def _get_search_tool():
+  """Get the configured search tool based on config."""
+  config = get_config()
+  provider = config.search_provider.lower()
+  
+  if provider == 'perplexity':
+    return perplexity_search_tool
+  else:
+    # Default to Google Search
+    return GoogleSearchTool(bypass_multi_tools_limit=True)
+
+
+SEARCH_TOOL = _get_search_tool()
 
 
 def tool(func: Callable[..., Any]) -> Callable[..., Any]:

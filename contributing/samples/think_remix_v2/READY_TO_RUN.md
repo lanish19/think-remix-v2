@@ -58,10 +58,17 @@ pip install google-adk pydantic pyyaml google-genai
 ### 2. Set API Keys
 ```bash
 export GOOGLE_API_KEY="your-gemini-api-key"
-# Optional: For web search
+
+# For search (choose one):
+# Option A: Perplexity API (default, recommended for research)
+export PERPLEXITY_API_KEY="your-perplexity-api-key"
+
+# Option B: Google Search (alternative)
 export GOOGLE_SEARCH_API_KEY="your-search-api-key"
 export GOOGLE_SEARCH_ENGINE_ID="your-search-engine-id"
 ```
+
+**Note:** By default, the system uses Perplexity API for search. To switch to Google Search, edit `config.yaml` and set `search.provider: 'google'`. See `PERPLEXITY_SETUP.md` for details.
 
 ### 3. Run with ADK CLI
 ```bash
@@ -95,6 +102,7 @@ Edit `config.yaml` to customize:
 - Max retries for schema validation
 - Optimization flags
 - Source credibility scores
+- **Search provider** (Perplexity or Google Search) - see `PERPLEXITY_SETUP.md`
 
 ## What Works
 
@@ -180,11 +188,33 @@ These are **optional** - the system is complete and functional as-is:
    - Stress tests
    - Performance benchmarks
 
+## Search Providers
+
+The system supports two search providers:
+
+1. **Perplexity API** (default) - Real-time web search with AI synthesis and citations
+   - Better for research queries
+   - Provides source citations
+   - Requires `PERPLEXITY_API_KEY`
+
+2. **Google Search** - Native Gemini integration
+   - Faster, no additional API key needed
+   - Uses Google Cloud credentials
+
+Configure in `config.yaml`:
+```yaml
+search:
+  provider: 'perplexity'  # or 'google'
+```
+
+See `PERPLEXITY_SETUP.md` for detailed setup instructions.
+
 ## Support
 
 - See `COMPLETENESS_CHECK.md` for detailed verification
 - See `IMPLEMENTATION_SUMMARY.md` for implementation details
 - See `REMAINING_WORK.md` for optional enhancements
+- See `PERPLEXITY_SETUP.md` for Perplexity API setup
 
 ---
 

@@ -64,3 +64,17 @@ workflow:
     primary: 0.95
     secondary: 0.75
     tertiary: 0.55
+
+  search:
+    # Search provider: 'google' or 'perplexity'
+    provider: 'perplexity'
+    
+    # Perplexity-specific settings
+    perplexity:
+      model: 'llama-3.1-sonar-large-128k-online'
+      max_results: 10
+      temperature: 0.2
+    
+    # Google Search settings (if using Google)
+    google:
+      num_results: 10

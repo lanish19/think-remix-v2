@@ -61,6 +61,17 @@ DEFAULT_CONFIG = {
             'secondary': 0.75,
             'tertiary': 0.55,
         },
+        'search': {
+            'provider': 'perplexity',
+            'perplexity': {
+                'model': 'llama-3.1-sonar-large-128k-online',
+                'max_results': 10,
+                'temperature': 0.2,
+            },
+            'google': {
+                'num_results': 10,
+            },
+        },
     },
 }
 
@@ -221,6 +232,20 @@ class Config:
         'primary': 0.95,
         'secondary': 0.75,
         'tertiary': 0.55,
+    })
+  
+  @property
+  def search_provider(self) -> str:
+    """Search provider: 'google' or 'perplexity'."""
+    return self.get('workflow.search.provider', 'perplexity')
+  
+  @property
+  def perplexity_config(self) -> dict[str, Any]:
+    """Perplexity API configuration."""
+    return self.get('workflow.search.perplexity', {
+        'model': 'llama-3.1-sonar-large-128k-online',
+        'max_results': 10,
+        'temperature': 0.2,
     })
 
 
