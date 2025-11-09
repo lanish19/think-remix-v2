@@ -26,6 +26,7 @@ from typing import Optional
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.llm_agent import Agent
 from google.adk.agents.sequential_agent import SequentialAgent
+from google.adk.tools.google_search_tool import GoogleSearchTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
@@ -85,6 +86,8 @@ FRAMEWORK_REQUIREMENTS: dict[str, str] = {
         'interconnected actors.'
     ),
 }
+
+SEARCH_TOOL = GoogleSearchTool(bypass_multi_tools_limit=True)
 
 
 def tool(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -205,6 +208,34 @@ async def _enforce_audit_gate(
   return types.Content(
       role='assistant', parts=[types.Part.from_text(json.dumps(payload))]
   )
+
+
+@tool
+def record_persona_analysis(
+    persona_result: dict[str, Any],
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+  """Stores persona analysis output inside workflow state."""
+  initialize_state(tool_context)
+  manager = StateManager(tool_context)
+  persona_id = persona_result.get('persona_id')
+  if not persona_id:
+    raise ValueError('persona_result must contain persona_id.')
+
+  updated_analyses = [
+      analysis
+      for analysis in manager.persona_analyses
+      if analysis.get('persona_id') != persona_id
+  ]
+  updated_analyses.append(persona_result)
+  manager.persona_analyses = updated_analyses
+  manager.append_audit_event(
+      {
+          'event': 'record_persona_analysis',
+          'persona_id': persona_id,
+      }
+  )
+  return persona_result
 
 
 def _build_question_audit_instruction() -> str:
@@ -1140,7 +1171,7 @@ gather_insights_agent = Agent(
     model='gemini-2.5-flash',
     instruction=_build_gather_insights_instruction(),
     description='Conducts comprehensive research and registers evidence in CER.',
-    tools=[register_evidence],
+    tools=[SEARCH_TOOL, register_evidence],
     output_key='gather_insights_result',
 )
 
@@ -1197,6 +1228,7 @@ def create_persona_agent(
       - Use Standardized Judgment Schema below.
       - Populate every required field. Use null only when unavoidable.
       - Ensure evidence sections reference valid CER fact ids.
+      - After producing the JSON schema, call register_persona_analysis with the JSON payload.
       """
   ).strip()
 
@@ -1205,6 +1237,7 @@ def create_persona_agent(
       model='gemini-2.5-pro',
       instruction=f'{persona_instruction}\n{STANDARDIZED_JUDGMENT_SCHEMA}',
       description=f'Dynamic persona agent for {persona_name}.',
+      tools=[record_persona_analysis],
       output_key=f"persona_analysis_{persona_config['id']}",
   )
 

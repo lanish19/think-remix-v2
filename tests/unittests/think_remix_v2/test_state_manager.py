@@ -44,3 +44,25 @@ def test_register_evidence_returns_structured_fact():
   assert result['statement'] == 'Market size is $500M'
   assert result['source_type'] == 'primary'
   assert result in ctx.state['cer_registry']
+
+
+def test_record_persona_analysis_updates_state():
+  ctx = FakeToolContext()
+  state_manager.initialize_state(ctx)  # type: ignore[arg-type]
+
+  payload = {
+      'persona_id': 'a',
+      'persona_name': 'Bayesian Strategist',
+      'evidence': {
+          'prioritized': [{'fact_id': 'CER-20250115-001', 'weight': 0.4}],
+          'ignored': [{'fact_id': 'CER-20250115-010'}],
+      },
+  }
+
+  stored = agent.record_persona_analysis(  # type: ignore[attr-defined]
+      persona_result=payload,
+      tool_context=ctx,  # type: ignore[arg-type]
+  )
+
+  assert stored == payload
+  assert ctx.state['persona_analyses'][0]['persona_id'] == 'a'
