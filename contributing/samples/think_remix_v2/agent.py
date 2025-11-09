@@ -25,7 +25,6 @@ from typing import Optional
 
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.llm_agent import Agent
-from google.adk.agents.sequential_agent import SequentialAgent
 from google.adk.tools.google_search_tool import GoogleSearchTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
@@ -33,6 +32,7 @@ from google.genai import types
 from .state_manager import StateManager
 from .state_manager import initialize_state
 from .state_manager import initialize_state_mapping
+from .workflow_agent import ThinkRemixWorkflowAgent
 
 
 SOURCE_CREDIBILITY_SCORES: dict[str, float] = {
@@ -1408,36 +1408,12 @@ qa_agent = Agent(
 )
 
 
-root_agent = SequentialAgent(
+# Create the custom workflow agent with conditional logic
+root_agent = ThinkRemixWorkflowAgent(
     name='think_remix_v2',
     description=(
         'THINK Remix v2.0: Workflow with evidence registry, persona diversity, '
-        'validation gates, and robustness scoring.'
+        'validation gates, conditional branching, parallel execution, and robustness scoring.'
     ),
-    sub_agents=[
-        question_audit_agent,
-        analyze_question_agent,
-        generate_nulls_agent,
-        gather_insights_agent,
-        persona_allocator_agent,
-        persona_validator_agent,
-        # NOTE: Dynamic persona agents should be created here using create_persona_agent()
-        # and executed in parallel. This requires custom workflow orchestration (Phase 3.1).
-        # For now, persona analyses are expected to be stored via record_persona_analysis tool.
-        synthesis_agent,
-        adversarial_injector_agent,
-        analyze_disagreement_agent,
-        analyze_blindspots_agent,
-        evidence_consistency_enforcer_agent,
-        search_inquiry_strategist_agent,
-        conduct_research_agent,
-        evidence_adjudicator_agent,
-        null_adjudicator_agent,
-        case_file_agent,
-        coverage_validator_agent,
-        robustness_calculator_agent,
-        qa_agent,
-        final_arbiter_agent,
-    ],
 )
 
