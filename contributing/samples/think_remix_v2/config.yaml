@@ -1,0 +1,80 @@
+# THINK Remix v2.0 Configuration
+
+workflow:
+  thresholds:
+    # Persona similarity threshold - personas with similarity >= this are rejected
+    persona_similarity_max: 0.70
+    
+    # CER credibility threshold for empirically settled facts
+    cer_credibility_bedrock: 0.80
+    
+    # Minimum fact preservation rate for coverage validation
+    fact_preservation_min: 0.70
+    
+    # Minimum divergence coverage for coverage validation
+    divergence_coverage_min: 0.90
+    
+    # Null coverage must be 100% (1.00)
+    null_coverage_min: 1.00
+    
+    # Minimum transcendent insight inclusion (must be 100%)
+    transcendent_insight_inclusion_min: 1.00
+
+  persona_allocation:
+    # Complexity thresholds for persona count determination
+    simple_max_complexity: 2.5
+    simple_count: 3
+    
+    moderate_max_complexity: 4.0
+    moderate_count: 5
+    
+    complex_count: 7
+    
+    # Maximum attempts for persona allocator loop
+    max_allocator_attempts: 3
+
+  validation:
+    # Maximum attempts for persona validator loop
+    max_persona_validator_attempts: 3
+    
+    # Maximum attempts for coverage validator loop
+    max_coverage_validator_attempts: 3
+    
+    # Maximum retries for JSON schema validation failures
+    max_schema_validation_retries: 2
+
+  optimization:
+    # Enable parallel execution for personas
+    enable_parallel_personas: true
+    
+    # Enable early termination when convergence is high
+    enable_early_termination: false
+    
+    # Early termination thresholds
+    early_termination_convergence_threshold: 0.85
+    early_termination_confidence_threshold: 0.80
+    
+    # Enable caching for CER facts
+    enable_caching: false
+    
+    # Cache TTL in hours
+    cache_ttl_hours: 24
+
+  source_credibility_scores:
+    primary: 0.95
+    secondary: 0.75
+    tertiary: 0.55
+
+  search:
+    # Search provider: 'google' or 'perplexity'
+    provider: 'perplexity'
+    
+    # Perplexity-specific settings
+    perplexity:
+      model: 'llama-3.1-sonar-large-128k-online'
+      max_results: 10
+      temperature: 0.2
+    
+    # Google Search settings (if using Google)
+    google:
+      num_results: 10

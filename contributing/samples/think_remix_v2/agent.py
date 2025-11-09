@@ -25,21 +25,25 @@ from typing import Optional
 
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.llm_agent import Agent
-from google.adk.agents.sequential_agent import SequentialAgent
 from google.adk.tools.google_search_tool import GoogleSearchTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
+from .config_loader import get_config
+from .perplexity_tool import perplexity_search_tool
 from .state_manager import StateManager
 from .state_manager import initialize_state
 from .state_manager import initialize_state_mapping
+from .workflow_agent import ThinkRemixWorkflowAgent
 
 
-SOURCE_CREDIBILITY_SCORES: dict[str, float] = {
-    'primary': 0.95,
-    'secondary': 0.75,
-    'tertiary': 0.55,
-}
+def _get_source_credibility_scores() -> dict[str, float]:
+  """Get source credibility scores from config."""
+  config = get_config()
+  return config.source_credibility_scores
+
+
+SOURCE_CREDIBILITY_SCORES: dict[str, float] = _get_source_credibility_scores()
 JSON_ONLY_WARNING = (
     'CRITICAL: Output ONLY valid JSON. No preamble, markdown, or commentary.'
 )
@@ -87,7 +91,19 @@ FRAMEWORK_REQUIREMENTS: dict[str, str] = {
     ),
 }
 
-SEARCH_TOOL = GoogleSearchTool(bypass_multi_tools_limit=True)
+def _get_search_tool():
+  """Get the configured search tool based on config."""
+  config = get_config()
+  provider = config.search_provider.lower()
+  
+  if provider == 'perplexity':
+    return perplexity_search_tool
+  else:
+    # Default to Google Search
+    return GoogleSearchTool(bypass_multi_tools_limit=True)
+
+
+SEARCH_TOOL = _get_search_tool()
 
 
 def tool(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -601,6 +617,8 @@ def _build_synthesis_instruction() -> str:
       integrating conditional truth regimes.
 
       METHOD:
+      - Access persona analyses from previous agent outputs (look for outputs with keys
+        like "persona_analysis_a", "persona_analysis_b", etc.) or from conversation history.
       - Extract divergence points between personas and map boundary conditions.
       - Build conditional logic: "If [condition], then [conclusion]."
       - Weight evidence by CER credibility. Facts <0.60 credibility cannot be
@@ -643,6 +661,9 @@ def _build_adversarial_instruction() -> str:
       develop counter-arguments rooted in those blind spots.
 
       STEPS:
+      - Access persona analyses from previous agent outputs (look for outputs with keys
+        like "persona_analysis_a", "persona_analysis_b", etc.) or from the conversation
+        history where persona agents recorded their analyses.
       - Parse persona analyses and gather ignored evidence lists.
       - Detect CER facts ignored by ≥60% of personas with credibility ≥0.85.
       - Construct adversarial reasoning using those facts.
@@ -681,6 +702,8 @@ def _build_disagreement_instruction() -> str:
       synthesis, and adversarial outputs.
 
       TASKS:
+      - Access persona analyses, synthesis result, and adversarial result from previous
+        agent outputs in the conversation history.
       - Extract conclusions, identify semantic conflicts, and classify conflict
         types (Core_Conflict, Constraint_Challenge, etc.).
       - Evaluate relevancy hypothesis from persona allocator.
@@ -725,6 +748,11 @@ def _build_null_adjudicator_instruction() -> str:
       OBJECTIVE: Aggregate persona judgments to render rulings on each null
       hypothesis using evidence strength and consensus.
 
+      INPUT:
+      - Access persona analyses from previous agent outputs (look for outputs with keys
+        like "persona_analysis_a", "persona_analysis_b", etc.) or from conversation history.
+      - Each persona analysis should contain null_hypothesis_assessment sections.
+
       RULES:
       - Reject if ≥70% reject AND ≥2 high-credibility (≥0.85) facts support.
       - Accept if ≥50% accept AND no contradictory high-credibility facts.
@@ -763,6 +791,10 @@ def _build_conduct_research_instruction() -> str:
 
       OBJECTIVE: Execute targeted confirmatory and disconfirmatory research for
       each inquiry objective supplied by the strategist.
+
+      INPUT:
+      - Access search_inquiry_plan from previous agent output (key: "search_inquiry_plan").
+      - Access synthesis_result to understand the mainstream conclusion for disconfirmatory searches.
 
       MANDATE:
       - For every objective run two tracks:
@@ -804,6 +836,10 @@ def _build_evidence_consistency_instruction() -> str:
 
       OBJECTIVE: Detect cherry-picking across persona analyses using CER
       credibility scores.
+
+      INPUT:
+      - Access persona analyses from previous agent outputs (look for outputs with keys
+        like "persona_analysis_a", "persona_analysis_b", etc.) or from conversation history.
 
       CHECKS:
       - High-credibility ignoring: evidence ignored with credibility >0.85.
@@ -849,6 +885,10 @@ def _build_evidence_adjudicator_instruction() -> str:
       OBJECTIVE: Resolve disagreements by comparing competing CER facts and
       determining which carry decisive weight.
 
+      INPUT:
+      - Access disagreement_analysis from previous agent output (key: "disagreement_analysis").
+      - Access null_adjudications from previous agent output (key: "null_adjudications").
+
       TASKS:
       - For each divergence driver, map competing evidence sets.
       - Compare credibility, redundancy, and alignment with null rulings.
@@ -882,6 +922,10 @@ def _build_case_file_instruction() -> str:
 
       OBJECTIVE: Produce structured case file consolidating adjudicated evidence,
       disagreements, uncertainties, and directives for the arbiter.
+
+      INPUT:
+      - Access gather_insights_result, disagreement_analysis, blindspot_analysis,
+        and evidence_adjudication from previous agent outputs in conversation history.
 
       REQUIREMENTS:
       - Section 1: Empirically Settled (credibility >0.80).
@@ -938,6 +982,11 @@ def _build_coverage_validator_instruction() -> str:
 
       OBJECTIVE: Ensure case file preserves critical information.
 
+      INPUT:
+      - Access case_file from previous agent output (key: "case_file").
+      - Access disagreement_analysis, null_adjudications, and gather_insights_result
+        from previous agent outputs in conversation history.
+
       METRICS:
       - fact_preservation_rate ≥ 0.70 for high-credibility facts.
       - divergence_coverage ≥ 0.90.
@@ -967,6 +1016,10 @@ def _build_robustness_instruction() -> str:
       ROLE: DECISION ROBUSTNESS CALCULATOR
 
       OBJECTIVE: Quantify decision robustness, sensitivity, and brittleness.
+
+      INPUT:
+      - Access case_file and null_adjudications from previous agent outputs in
+        conversation history.
 
       TASKS:
       - Calculate Decision Robustness Score (DRS) using load-bearing evidence.
@@ -1003,6 +1056,10 @@ def _build_final_arbiter_instruction() -> str:
 
       OBJECTIVE: Deliver final judgment with quantified robustness, explicit
       sensitivity, and transparent uncertainty acknowledgement.
+
+      INPUT:
+      - Access case_file (key: "case_file") and robustness_metrics (key: "robustness_metrics")
+        from previous agent outputs in conversation history.
 
       CONSTRAINTS:
       1. Confidence cannot exceed confidence_ceiling from robustness metrics.
@@ -1055,6 +1112,10 @@ def _build_analyze_blindspots_instruction() -> str:
 
       OBJECTIVE: Detect uniformly ignored evidence, shared assumptions, and
       unanimous null rejections indicating groupthink.
+
+      INPUT:
+      - Access persona analyses from previous agent outputs (look for outputs with keys
+        like "persona_analysis_a", "persona_analysis_b", etc.) or from conversation history.
       """
   ).strip()
   schema = _json_directive(
@@ -1085,6 +1146,10 @@ def _build_search_inquiry_instruction() -> str:
 
       OBJECTIVE: Generate prioritized inquiry objectives leveraging disagreement,
       blindspot, and transcendent insights data.
+
+      INPUT:
+      - Access disagreement_analysis and blindspot_analysis from previous agent outputs
+        in the conversation history.
 
       PRIORITIZATION ORDER:
       1. Transcendent insights requiring verification.
@@ -1120,6 +1185,9 @@ def _build_qa_instruction() -> str:
 
       OBJECTIVE: Stress test the case file and arbiter plan with adversarial
       questions and audit notes.
+
+      INPUT:
+      - Access case_file from previous agent output (key: "case_file").
       """
   ).strip()
   schema = _json_directive(
@@ -1228,7 +1296,7 @@ def create_persona_agent(
       - Use Standardized Judgment Schema below.
       - Populate every required field. Use null only when unavoidable.
       - Ensure evidence sections reference valid CER fact ids.
-      - After producing the JSON schema, call register_persona_analysis with the JSON payload.
+      - After producing the JSON schema, call record_persona_analysis with the JSON payload.
       """
   ).strip()
 
@@ -1279,7 +1347,7 @@ conduct_research_agent = Agent(
     model='gemini-2.5-flash',
     instruction=_build_conduct_research_instruction(),
     description='Executes confirmatory and disconfirmatory research tracks.',
-    tools=[register_evidence],
+    tools=[SEARCH_TOOL, register_evidence],
     output_key='targeted_research',
 )
 
@@ -1356,33 +1424,12 @@ qa_agent = Agent(
 )
 
 
-root_agent = SequentialAgent(
+# Create the custom workflow agent with conditional logic
+root_agent = ThinkRemixWorkflowAgent(
     name='think_remix_v2',
     description=(
         'THINK Remix v2.0: Workflow with evidence registry, persona diversity, '
-        'validation gates, and robustness scoring.'
+        'validation gates, conditional branching, parallel execution, and robustness scoring.'
     ),
-    sub_agents=[
-        question_audit_agent,
-        analyze_question_agent,
-        generate_nulls_agent,
-        gather_insights_agent,
-        persona_allocator_agent,
-        persona_validator_agent,
-        analyze_blindspots_agent,
-        search_inquiry_strategist_agent,
-        conduct_research_agent,
-        evidence_consistency_enforcer_agent,
-        evidence_adjudicator_agent,
-        synthesis_agent,
-        adversarial_injector_agent,
-        analyze_disagreement_agent,
-        null_adjudicator_agent,
-        case_file_agent,
-        coverage_validator_agent,
-        robustness_calculator_agent,
-        qa_agent,
-        final_arbiter_agent,
-    ],
 )
 
