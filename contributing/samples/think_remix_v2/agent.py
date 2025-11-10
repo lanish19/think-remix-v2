@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime
 from textwrap import dedent
 from typing import Any
@@ -138,6 +139,46 @@ def _normalize_source_type(source_type: str) -> str:
   return normalized
 
 
+def _normalize_date_token(date_accessed: Optional[str]) -> str:
+  """Normalize date token to YYYYMMDD format."""
+  if date_accessed:
+    date_accessed = date_accessed.strip()
+    # Try to parse if not already in YYYYMMDD format
+    if len(date_accessed) == 8 and date_accessed.isdigit():
+      return date_accessed
+    # Try parsing other formats
+    try:
+      dt = datetime.strptime(date_accessed, '%Y-%m-%d')
+      return dt.strftime('%Y%m%d')
+    except ValueError:
+      logger.warning('Invalid date format: %s, using current date', date_accessed)
+  return datetime.utcnow().strftime('%Y%m%d')
+
+
+def _validate_credibility_score(
+    credibility_override: Optional[float],
+    normalized_source_type: str,
+) -> float:
+  """Validate and normalize credibility score."""
+  base_score = SOURCE_CREDIBILITY_SCORES.get(normalized_source_type, 0.55)
+  if credibility_override is not None:
+    try:
+      credibility = float(credibility_override)
+    except (ValueError, TypeError) as e:
+      raise TypeError(
+          f'credibility_override must be a number, got {type(credibility_override).__name__}'
+      ) from e
+
+    if math.isnan(credibility) or math.isinf(credibility):
+      raise ValueError(f'Invalid credibility_override: {credibility_override} (NaN or Inf)')
+
+    credibility = max(0.0, min(1.0, credibility))
+  else:
+    credibility = base_score
+
+  return credibility
+
+
 @tool
 def register_evidence(
     statement: str,
@@ -152,15 +193,29 @@ def register_evidence(
 ) -> dict[str, Any]:
   """Registers evidence in the Central Evidence Registry with structured output."""
   # INPUT VALIDATION
-  if not statement or len(statement.strip()) == 0:
-    raise ValueError('Statement cannot be empty')
+  # Check None values
+  if statement is None:
+    raise ValueError('Statement cannot be None')
+  if not isinstance(statement, str):
+    raise TypeError(f'Statement must be a string, got {type(statement).__name__}')
+  if source is None:
+    raise ValueError('Source cannot be None')
+  if not isinstance(source, str):
+    raise TypeError(f'Source must be a string, got {type(source).__name__}')
+
+  # Check empty/whitespace
+  statement = statement.strip()
+  if len(statement) == 0:
+    raise ValueError('Statement cannot be empty or whitespace-only')
+
+  # Check length limits
   if len(statement) > 10000:
     raise ValueError('Statement exceeds maximum length (10000 chars)')
   if len(source) > 2000:
     raise ValueError('Source URL exceeds maximum length (2000 chars)')
-  
-  # Sanitize inputs
-  statement = statement.strip()[:10000]
+
+  # Sanitize inputs (already trimmed, just truncate if needed)
+  statement = statement[:10000]
   source = source.strip()[:2000]
   
   try:
@@ -170,43 +225,46 @@ def register_evidence(
       logger.debug('register_evidence called - checking state keys: %s', list(state_dict.keys()))
     except (AttributeError, KeyError) as e:
       logger.debug('register_evidence called - could not access state keys: %s', e)
-    
-    # Initialize state with enhanced error handling
-    try:
-      initialize_state(tool_context)
-    except TypeError as te:
-      logger.error('State initialization failed in register_evidence: %s', te, exc_info=True)
-      # Try to fix common state issues
-      if 'null_hypotheses' in str(te):
-        logger.warning('Attempting to fix null_hypotheses state issue')
-        # Ensure null_hypotheses is a list
-        if 'null_hypotheses' in tool_context.state and not isinstance(tool_context.state['null_hypotheses'], list):
-          logger.warning('Converting null_hypotheses from %s to list',
-                        type(tool_context.state['null_hypotheses']))
-          # If it's a dict with 'null_hypotheses' key, extract the list
-          if isinstance(tool_context.state['null_hypotheses'], dict):
-            if 'null_hypotheses' in tool_context.state['null_hypotheses']:
-              tool_context.state['null_hypotheses'] = tool_context.state['null_hypotheses']['null_hypotheses']
+
+    # Initialize state with retry logic (max 2 retries)
+    max_init_retries = 2
+    init_success = False
+    for attempt in range(max_init_retries):
+      try:
+        initialize_state(tool_context)
+        init_success = True
+        break
+      except TypeError as te:
+        if attempt < max_init_retries - 1 and 'null_hypotheses' in str(te):
+          logger.warning('Attempting to fix null_hypotheses state issue (attempt %d)', attempt + 1)
+          # Ensure null_hypotheses is a list
+          if 'null_hypotheses' in tool_context.state and not isinstance(tool_context.state['null_hypotheses'], list):
+            logger.warning('Converting null_hypotheses from %s to list',
+                          type(tool_context.state['null_hypotheses']))
+            # If it's a dict with 'null_hypotheses' key, extract the list
+            if isinstance(tool_context.state['null_hypotheses'], dict):
+              if 'null_hypotheses' in tool_context.state['null_hypotheses']:
+                tool_context.state['null_hypotheses'] = tool_context.state['null_hypotheses']['null_hypotheses']
+              else:
+                tool_context.state['null_hypotheses'] = []
             else:
               tool_context.state['null_hypotheses'] = []
-          else:
-            tool_context.state['null_hypotheses'] = []
-        # Retry initialization
-        initialize_state(tool_context)
-    
+        else:
+          # Re-raise if can't fix or max retries reached
+          raise
+
+    if not init_success:
+      raise RuntimeError('Failed to initialize state after retries')
+
     manager = StateManager(tool_context)
-    
+
     logger.debug('StateManager created, CER registry size: %d', len(manager.cer_registry))
 
     normalized_source_type = _normalize_source_type(source_type)
-    date_token = (date_accessed or datetime.utcnow().strftime('%Y%m%d')).strip()
+    date_token = _normalize_date_token(date_accessed)
     fact_id = manager.next_fact_id(date_token)
 
-    base_score = SOURCE_CREDIBILITY_SCORES.get(normalized_source_type, 0.55)
-    if credibility_override is not None:
-      credibility = max(0.0, min(1.0, float(credibility_override)))
-    else:
-      credibility = base_score
+    credibility = _validate_credibility_score(credibility_override, normalized_source_type)
 
     metadata: dict[str, Any] = {}
     if research_track:
@@ -232,28 +290,35 @@ def register_evidence(
             'credibility_score': stored['credibility_score'],
         }
     )
-    
+
     logger.info('Successfully registered evidence: %s (credibility: %.2f)',
                 fact_id, stored['credibility_score'])
-    
+
     return stored
-  except Exception as e:
+  except (ValueError, TypeError, AttributeError, KeyError, RuntimeError) as e:
+    # Handle expected errors
     logger.error('Error in register_evidence: %s', e, exc_info=True)
     # Log detailed state information for debugging
     try:
       state_dict = tool_context.state.to_dict()
       state_info = {k: type(v).__name__ for k, v in state_dict.items()}
       logger.error('State types at error: %s', state_info)
-    except (AttributeError, KeyError) as e:
-      logger.error('Could not log state information: %s', e)
-    
+    except Exception as log_error:
+      logger.error('Could not log state information: %s', log_error)
+
     # Return a valid response even on error so workflow can continue
     return {
-        'fact_id': 'ERROR',
+        'fact_id': f'ERROR-{datetime.utcnow().strftime("%Y%m%d-%H%M%S")}',
         'statement': statement[:100] if statement else 'N/A',
         'error': str(e),
         'status': 'failed',
     }
+  except Exception as e:
+    # Unexpected errors - re-raise system exceptions
+    if isinstance(e, (KeyboardInterrupt, SystemExit)):
+      raise
+    logger.critical('Unexpected error in register_evidence: %s', e, exc_info=True)
+    raise  # Re-raise unexpected errors
 
 
 async def _bootstrap_workflow_state(
