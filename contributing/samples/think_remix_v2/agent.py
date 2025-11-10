@@ -151,10 +151,25 @@ def register_evidence(
     analyst: Optional[str] = None,
 ) -> dict[str, Any]:
   """Registers evidence in the Central Evidence Registry with structured output."""
+  # INPUT VALIDATION
+  if not statement or len(statement.strip()) == 0:
+    raise ValueError('Statement cannot be empty')
+  if len(statement) > 10000:
+    raise ValueError('Statement exceeds maximum length (10000 chars)')
+  if len(source) > 2000:
+    raise ValueError('Source URL exceeds maximum length (2000 chars)')
+  
+  # Sanitize inputs
+  statement = statement.strip()[:10000]
+  source = source.strip()[:2000]
+  
   try:
     # Log state before initialization for debugging
-    logger.debug('register_evidence called - checking state keys: %s',
-                list(tool_context.state.keys()) if hasattr(tool_context, 'state') else 'no state')
+    try:
+      state_dict = tool_context.state.to_dict()
+      logger.debug('register_evidence called - checking state keys: %s', list(state_dict.keys()))
+    except (AttributeError, KeyError) as e:
+      logger.debug('register_evidence called - could not access state keys: %s', e)
     
     # Initialize state with enhanced error handling
     try:
@@ -226,10 +241,11 @@ def register_evidence(
     logger.error('Error in register_evidence: %s', e, exc_info=True)
     # Log detailed state information for debugging
     try:
-      state_info = {k: type(v).__name__ for k, v in tool_context.state.items()}
+      state_dict = tool_context.state.to_dict()
+      state_info = {k: type(v).__name__ for k, v in state_dict.items()}
       logger.error('State types at error: %s', state_info)
-    except Exception:
-      logger.error('Could not log state information')
+    except (AttributeError, KeyError) as e:
+      logger.error('Could not log state information: %s', e)
     
     # Return a valid response even on error so workflow can continue
     return {
@@ -275,7 +291,7 @@ async def _enforce_audit_gate(
 
   callback_context._invocation_context.end_invocation = True  # pylint: disable=protected-access
   return types.Content(
-      role='assistant', parts=[types.Part.from_text(json.dumps(payload))]
+      role='assistant', parts=[types.Part(text=json.dumps(payload))]
   )
 
 
@@ -305,6 +321,45 @@ def record_persona_analysis(
       }
   )
   return persona_result
+
+
+@tool
+def get_high_credibility_facts(
+    min_credibility: float,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+  """Retrieves facts from CER registry with credibility score >= min_credibility.
+  
+  Args:
+    min_credibility: Minimum credibility score threshold (typically 0.80 for
+      established facts).
+    tool_context: Tool context providing access to workflow state.
+  
+  Returns:
+    Dictionary with 'facts' list containing fact entries matching the threshold,
+    and 'count' indicating total number of matching facts.
+  """
+  initialize_state(tool_context)
+  manager = StateManager(tool_context)
+  
+  threshold = float(min_credibility)
+  matching_facts = [
+      fact
+      for fact in manager.cer_registry
+      if fact.get('credibility_score', 0.0) >= threshold
+  ]
+  
+  logger.info(
+      'Retrieved %d facts with credibility >= %.2f from CER registry',
+      len(matching_facts),
+      threshold,
+  )
+  
+  return {
+      'facts': matching_facts,
+      'count': len(matching_facts),
+      'min_credibility': threshold,
+  }
 
 
 def _build_question_audit_instruction() -> str:
@@ -812,9 +867,18 @@ def _build_null_adjudicator_instruction() -> str:
 
       RULES:
       - Reject if ≥70% reject AND ≥2 high-credibility (≥0.85) facts support.
+      - SPECIAL CASE: If persona consensus for rejection is unanimous (100% reject),
+        you SHOULD issue a "Reject" ruling even if there are fewer than 2 high-credibility
+        facts available, as unanimous consensus is strong evidence. Do NOT default to
+        "Undetermined" when there is unanimous rejection consensus - use "Reject" and
+        explain the limitation in the notes field.
       - Accept if ≥50% accept AND no contradictory high-credibility facts.
       - Otherwise mark Undetermined.
       - Compute skepticism_score capturing residual doubt (0.0-1.0).
+      - In notes, explicitly state when rulings are affected by missing evidence
+        registration (e.g., "Unanimous rejection consensus (7/7) but cannot validate
+        due to no high-credibility CER facts being registered. Ruling based on persona
+        consensus alone.").
       """
   ).strip()
   schema = _json_directive(
@@ -983,14 +1047,24 @@ def _build_case_file_instruction() -> str:
       disagreements, uncertainties, and directives for the arbiter.
 
       INPUT:
+      - CRITICAL: Use the get_high_credibility_facts tool with min_credibility=0.80
+        to retrieve facts from the CER registry. Populate section_1.established_facts
+        with facts returned by this tool. Each fact should include fact_id and statement.
       - Access null hypotheses from null_hypotheses_result (key: "null_hypotheses_result")
         in conversation history or state.
       - Access gather_insights_result, disagreement_analysis, blindspot_analysis,
         and evidence_adjudication from previous agent outputs in conversation history.
+      - CRITICAL: For section_2.competing_frameworks, you MUST include ALL disagreements
+        from disagreement_analysis.divergence_drivers. Iterate through every entry
+        in divergence_drivers and include each one with its disagreement_id.
 
       REQUIREMENTS:
-      - Section 1: Empirically Settled (credibility >0.80).
-      - Section 2: Legitimately Contested (unresolved conflicts).
+      - Section 1: Empirically Settled (credibility >0.80). MUST be populated from
+        cer_registry state. If cer_registry is empty or has no facts with credibility >0.80,
+        established_facts must be an empty list [].
+      - Section 2: Legitimately Contested (unresolved conflicts). MUST include ALL
+        disagreements from disagreement_analysis.divergence_drivers. Missing any
+        disagreement_id is a critical error.
       - Section 3: Irreducible Uncertainties (insufficient evidence).
       - Section 4: Directives for Arbiter (null summaries, insights).
       - Provide compression_report counts.
@@ -1128,7 +1202,14 @@ def _build_final_arbiter_instruction() -> str:
          resolution, uncertainty handling).
       3. Include sensitivity disclosure describing flip conditions.
       4. Acknowledge accepted or undetermined null hypotheses explicitly.
-      5. Final answer must reference CER fact_ids for every factual statement.
+      5. CRITICAL: Final answer must ONLY reference CER fact_ids that are explicitly
+         present in case_file.section_1.established_facts. You MUST verify each fact_id
+         you cite exists in that list. If case_file.section_1.established_facts is empty,
+         you MUST NOT cite any fact_ids and instead explicitly state that conclusions
+         are based on synthesis or persona agreement but lack formally registered evidence.
+         Do NOT hallucinate or invent fact_ids that do not exist in established_facts.
+      6. If no established_facts exist, acknowledge this limitation transparently in
+         your final_answer and justification_trace.
       """
   ).strip()
   schema = _json_directive(
@@ -1433,6 +1514,7 @@ case_file_agent = Agent(
     model='gemini-2.5-flash',
     instruction=_build_case_file_instruction(),
     description='Compiles case file sections with traceability to CER.',
+    tools=[get_high_credibility_facts],
     output_key='case_file',
 )
 

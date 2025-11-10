@@ -6,12 +6,15 @@ from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
+import logging
 from pathlib import Path
 from typing import Any
 from typing import Iterable
 from typing import Optional
 
 from google.adk.tools.tool_context import ToolContext
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_STATE_SNAPSHOT = {
@@ -28,8 +31,36 @@ DEFAULT_STATE_SNAPSHOT = {
 
 
 def _initialize_mapping(state: MutableMapping[str, Any]) -> None:
+  # Handle State objects that don't support .items() or .keys() directly
+  # State objects support dict-like access but may not have all dict methods
+  state_keys = set()
+  
+  # Try to get keys via to_dict() - works for State objects
+  try:
+    if hasattr(state, 'to_dict'):
+      state_dict = state.to_dict()
+      # state_dict should be a regular dict, so .keys() is safe
+      state_keys = set(state_dict.keys())
+    elif hasattr(state, 'keys'):
+      # For regular dicts, use .keys()
+      state_keys = set(state.keys())
+  except (AttributeError, TypeError):
+    # If to_dict() or keys() fails, fall through to fallback
+    pass
+  
+  # Fallback: build state_keys using 'in' operator (safest method)
+  # This works for both dicts and State objects
+  if not state_keys:
+    for key in DEFAULT_STATE_SNAPSHOT:
+      try:
+        if key in state:
+          state_keys.add(key)
+      except (AttributeError, TypeError):
+        # Skip this key if we can't check it
+        continue
+  
   for key, default_value in DEFAULT_STATE_SNAPSHOT.items():
-    if key not in state:
+    if key not in state_keys:
       state[key] = (
           default_value.copy()
           if isinstance(default_value, (dict, list))
@@ -42,7 +73,15 @@ def _initialize_mapping(state: MutableMapping[str, Any]) -> None:
     raise TypeError('Expected persona_analyses to be a list.')
   # null_hypotheses should be a list for internal state management
   if not isinstance(state['null_hypotheses'], list):
-    raise TypeError(f'Expected null_hypotheses to be a list, got {type(state["null_hypotheses"])}')
+    # Handle dict case explicitly (agent output may be dict)
+    if isinstance(state['null_hypotheses'], dict):
+      if 'null_hypotheses' in state['null_hypotheses']:
+        state['null_hypotheses'] = state['null_hypotheses']['null_hypotheses']
+      else:
+        state['null_hypotheses'] = []
+    else:
+      state['null_hypotheses'] = []
+    logger.warning('Converted null_hypotheses from non-list type to list')
   # null_hypotheses_result is the agent output dict
   if not isinstance(state['null_hypotheses_result'], dict):
     raise TypeError(f'Expected null_hypotheses_result to be a dict, got {type(state["null_hypotheses_result"])}')

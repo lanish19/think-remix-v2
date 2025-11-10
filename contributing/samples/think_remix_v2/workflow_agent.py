@@ -175,9 +175,9 @@ class ThinkRemixWorkflowAgent(BaseAgent):
                 ),
             )
             ctx.session.append_event(error_event)
-          except Exception:
+          except (AttributeError, TypeError) as e:
             # If we can't add to session, at least log it
-            logger.debug('Could not add validation error to session')
+            logger.debug('Could not add validation error to session: %s', e)
       else:
         logger.error(
             'Validation failed for agent %s after %d attempts: %s. Continuing anyway.',
@@ -197,7 +197,12 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     # Initialize state with error handling
     try:
       initialize_state_mapping(ctx.session.state)
-      logger.debug('State initialized successfully. Keys: %s', list(ctx.session.state.keys()))
+      # Use to_dict() to safely get keys for logging
+      try:
+        state_dict = ctx.session.state.to_dict() if hasattr(ctx.session.state, 'to_dict') else ctx.session.state
+        logger.debug('State initialized successfully. Keys: %s', list(state_dict.keys()))
+      except (AttributeError, TypeError):
+        logger.debug('State initialized successfully (could not list keys)')
     except Exception as e:
       logger.error('Failed to initialize state: %s', e, exc_info=True)
       raise

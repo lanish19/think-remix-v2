@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""THINK Remix v2.0: Multi-Agent Reasoning Workflow.
+
+This package implements a sophisticated multi-agent reasoning system with
+evidence-based analysis, persona diversity, and robustness quantification.
+"""
+
+from __future__ import annotations
+
 from . import agent
 
 __all__ = ['agent']
