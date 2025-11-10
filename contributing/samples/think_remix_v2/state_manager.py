@@ -55,32 +55,37 @@ DEFAULT_STATE_SNAPSHOT = {
 
 
 def _get_state_keys_safely(state: MutableMapping[str, Any]) -> set[str]:
-  """Safely get keys from State object or dict."""
+  """Safely get keys from State object or dict.
+  
+  NEVER calls .keys() directly on state - always uses to_dict() first
+  or the 'in' operator which works for both dicts and State objects.
+  """
   state_keys = set()
 
-  # Try to get keys via to_dict() - works for State objects
+  # Strategy 1: Try to_dict() for State objects (safest method)
   try:
-    if hasattr(state, 'to_dict'):
+    if hasattr(state, 'to_dict') and callable(getattr(state, 'to_dict', None)):
       state_dict = state.to_dict()
       # state_dict should be a regular dict, so .keys() is safe
-      state_keys = set(state_dict.keys())
-    elif hasattr(state, 'keys'):
-      # For regular dicts, use .keys()
-      state_keys = set(state.keys())
-  except (AttributeError, TypeError):
-    # If to_dict() or keys() fails, fall through to fallback
-    pass
+      if isinstance(state_dict, dict):
+        state_keys = set(state_dict.keys())
+        # If we got keys successfully, return early
+        if state_keys:
+          return state_keys
+  except Exception as e:
+    # If to_dict() fails, fall through to fallback
+    logger.debug('Could not get keys via to_dict(): %s', e)
 
-  # Fallback: build state_keys using 'in' operator (safest method)
-  # This works for both dicts and State objects
-  if not state_keys:
-    for key in DEFAULT_STATE_SNAPSHOT:
-      try:
-        if key in state:
-          state_keys.add(key)
-      except (AttributeError, TypeError):
-        # Skip this key if we can't check it
-        continue
+  # Strategy 2: Fallback - build state_keys using 'in' operator
+  # This works for both dicts and State objects WITHOUT calling .keys()
+  # Check each key in DEFAULT_STATE_SNAPSHOT to see if it exists in state
+  for key in DEFAULT_STATE_SNAPSHOT:
+    try:
+      if key in state:
+        state_keys.add(key)
+    except (AttributeError, TypeError):
+      # Skip this key if we can't check it
+      continue
 
   return state_keys
 
@@ -122,23 +127,56 @@ def _validate_state_types(state: MutableMapping[str, Any]) -> None:
 
 def _initialize_mapping(state: MutableMapping[str, Any]) -> None:
   """Initialize state with proper type validation and deep copies."""
-  # Get existing keys safely
-  state_keys = _get_state_keys_safely(state)
+  try:
+    # Get existing keys safely
+    state_keys = _get_state_keys_safely(state)
 
-  # Validate existing state types BEFORE modifying
-  _validate_existing_state_types(state, state_keys)
+    # Validate existing state types BEFORE modifying
+    _validate_existing_state_types(state, state_keys)
 
-  # Initialize missing keys with deep copies
-  for key, default_value in DEFAULT_STATE_SNAPSHOT.items():
-    if key not in state_keys:
-      state[key] = (
-          copy.deepcopy(default_value)
-          if isinstance(default_value, (dict, list))
-          else default_value
+    # Initialize missing keys with deep copies
+    for key, default_value in DEFAULT_STATE_SNAPSHOT.items():
+      if key not in state_keys:
+        try:
+          state[key] = (
+              copy.deepcopy(default_value)
+              if isinstance(default_value, (dict, list))
+              else default_value
+          )
+        except Exception as e:
+          # If deepcopy fails (e.g., due to State objects), use shallow copy or direct assignment
+          logger.warning('Deep copy failed for key %s, using direct assignment: %s', key, e)
+          state[key] = default_value
+
+    # Final type validation
+    _validate_state_types(state)
+  except AttributeError as e:
+    # Catch any AttributeError (like 'keys' not found) and provide better error message
+    if 'keys' in str(e):
+      logger.error(
+          'State object does not support .keys() method. '
+          'This should have been handled by _get_state_keys_safely(). '
+          'Error: %s', e
       )
-
-  # Final type validation
-  _validate_state_types(state)
+      # Try to recover by using fallback method
+      state_keys = set()
+      for key in DEFAULT_STATE_SNAPSHOT:
+        try:
+          if key in state:
+            state_keys.add(key)
+        except Exception:
+          continue
+      # Retry initialization with recovered keys
+      for key, default_value in DEFAULT_STATE_SNAPSHOT.items():
+        if key not in state_keys:
+          state[key] = (
+              copy.deepcopy(default_value)
+              if isinstance(default_value, (dict, list))
+              else default_value
+          )
+      _validate_state_types(state)
+    else:
+      raise
 
 
 def initialize_state_mapping(state: MutableMapping[str, Any]) -> None:

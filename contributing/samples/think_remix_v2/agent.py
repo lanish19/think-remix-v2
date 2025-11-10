@@ -33,12 +33,17 @@ from google.genai import types
 
 from .config_loader import get_config
 from .perplexity_tool import perplexity_search_tool
+from .state_compat import bootstrap_known_state_classes
+from .state_compat import ensure_state_mapping_methods
 from .state_manager import StateManager
 from .state_manager import initialize_state
 from .state_manager import initialize_state_mapping
 from .workflow_agent import ThinkRemixWorkflowAgent
 
 logger = logging.getLogger(__name__)
+
+
+bootstrap_known_state_classes()
 
 
 def _get_source_credibility_scores() -> dict[str, float]:
@@ -218,12 +223,20 @@ def register_evidence(
   statement = statement[:10000]
   source = source.strip()[:2000]
   
+  ensure_state_mapping_methods(getattr(tool_context, 'state', None))
+
   try:
     # Log state before initialization for debugging
     try:
-      state_dict = tool_context.state.to_dict()
-      logger.debug('register_evidence called - checking state keys: %s', list(state_dict.keys()))
-    except (AttributeError, KeyError) as e:
+      if hasattr(tool_context.state, 'to_dict') and callable(getattr(tool_context.state, 'to_dict', None)):
+        state_dict = tool_context.state.to_dict()
+        if isinstance(state_dict, dict):
+          logger.debug('register_evidence called - checking state keys: %s', list(state_dict.keys()))
+        else:
+          logger.debug('register_evidence called - to_dict() returned non-dict: %s', type(state_dict))
+      else:
+        logger.debug('register_evidence called - state does not have to_dict() method')
+    except (AttributeError, KeyError, TypeError) as e:
       logger.debug('register_evidence called - could not access state keys: %s', e)
 
     # Initialize state with retry logic (max 2 retries)
@@ -298,11 +311,75 @@ def register_evidence(
   except (ValueError, TypeError, AttributeError, KeyError, RuntimeError) as e:
     # Handle expected errors
     logger.error('Error in register_evidence: %s', e, exc_info=True)
+    # If the error is caused by a State.keys() call somewhere in the stack,
+    # attempt a minimal, no-initialize fallback to register the fact directly.
+    try:
+      if isinstance(e, AttributeError) and 'keys' in str(e):
+        logger.warning('Attempting CER registration via fallback path due to keys() error')
+        # Minimal normalization
+        normalized_source_type = _normalize_source_type(source_type)
+        date_token = _normalize_date_token(date_accessed)
+        credibility = _validate_credibility_score(credibility_override, normalized_source_type)
+        # Ensure CER structures exist without calling any initializer
+        cer_registry = tool_context.state.get('cer_registry')
+        if not isinstance(cer_registry, list):
+          cer_registry = []
+          tool_context.state['cer_registry'] = cer_registry
+        sequences = tool_context.state.get('cer_daily_sequences')
+        if not isinstance(sequences, dict):
+          sequences = {}
+          tool_context.state['cer_daily_sequences'] = sequences
+        next_sequence = sequences.get(date_token, 1)
+        sequences[date_token] = next_sequence + 1
+        fact_id = f'CER-{date_token}-{next_sequence:03d}'
+        entry = {
+            'fact_id': fact_id,
+            'statement': statement.strip()[:10000] if statement else '',
+            'source': source.strip()[:2000] if source else '',
+            'source_type': normalized_source_type,
+            'credibility_score': round(float(credibility), 4),
+            'date_accessed': date_token,
+            'registered_at': datetime.utcnow().isoformat(timespec='seconds'),
+        }
+        meta: dict[str, Any] = {}
+        if research_track:
+          meta['research_track'] = research_track
+        if analyst:
+          meta['registered_by'] = analyst
+        if meta:
+          entry['metadata'] = meta
+        cer_registry.append(entry)
+        # Audit trail (best-effort)
+        try:
+          audit = tool_context.state.get('workflow_audit_trail')
+          if isinstance(audit, list):
+            audit.append(
+                {
+                    'timestamp': datetime.utcnow().isoformat(timespec='seconds'),
+                    'event': 'register_evidence_fallback',
+                    'fact_id': fact_id,
+                    'source_type': normalized_source_type,
+                    'credibility_score': entry['credibility_score'],
+                }
+            )
+        except Exception:
+          pass
+        logger.info('Fallback CER registration succeeded: %s', fact_id)
+        return entry
+    except Exception as fallback_error:
+      logger.error('Fallback CER registration failed: %s', fallback_error, exc_info=True)
+
     # Log detailed state information for debugging
     try:
-      state_dict = tool_context.state.to_dict()
-      state_info = {k: type(v).__name__ for k, v in state_dict.items()}
-      logger.error('State types at error: %s', state_info)
+      if hasattr(tool_context.state, 'to_dict') and callable(getattr(tool_context.state, 'to_dict', None)):
+        state_dict = tool_context.state.to_dict()
+        if isinstance(state_dict, dict):
+          state_info = {k: type(v).__name__ for k, v in state_dict.items()}
+          logger.error('State types at error: %s', state_info)
+        else:
+          logger.error('State to_dict() returned non-dict: %s', type(state_dict))
+      else:
+        logger.error('State does not have to_dict() method')
     except Exception as log_error:
       logger.error('Could not log state information: %s', log_error)
 

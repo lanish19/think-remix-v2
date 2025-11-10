@@ -12,20 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""THINK Remix v2.0: Multi-Agent Reasoning Workflow.
+"""Bootstrap module to ensure State compatibility shim is loaded at process startup.
 
-This package implements a sophisticated multi-agent reasoning system with
-evidence-based analysis, persona diversity, and robustness quantification.
+This module should be imported early in the application lifecycle (e.g., in the
+main entrypoint or server startup code) to guarantee that ADK State objects
+have the necessary mapping helpers (keys, items, values, etc.) before any
+workflow or agent code runs.
+
+Usage:
+    import contributing.samples.think_remix_v2.site_bootstrap  # noqa: F401
 """
 
 from __future__ import annotations
 
-# Bootstrap state compatibility shim before any agent imports
-from .state_compat import bootstrap_known_state_classes as _bootstrap_state
+from .state_compat import bootstrap_known_state_classes
 
-_bootstrap_state()
-
-from . import agent
-
-__all__ = ['agent']
+# Apply compatibility shim immediately on import
+bootstrap_known_state_classes()
 

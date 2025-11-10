@@ -36,6 +36,7 @@ from typing_extensions import override
 
 from . import agent
 from .config_loader import get_config
+from .state_compat import ensure_state_mapping_methods
 from .state_manager import initialize_state_mapping
 from .validation import validate_agent_output_by_key
 
@@ -194,15 +195,33 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     """Execute the THINK Remix workflow with conditional branching."""
     logger.info('Starting THINK Remix v2.0 workflow')
     
+    # Ensure state compatibility shim is applied to the live instance
+    ensure_state_mapping_methods(ctx.session.state)
+    
+    # Debug: Log ADK State module path to verify correct version is loaded
+    try:
+      import google.adk.sessions.state as state_module
+      logger.debug('ADK State module path: %s', getattr(state_module, '__file__', 'unknown'))
+    except Exception as e:
+      logger.debug('Could not determine ADK State module path: %s', e)
+    
     # Initialize state with error handling
     try:
       initialize_state_mapping(ctx.session.state)
       # Use to_dict() to safely get keys for logging
       try:
-        state_dict = ctx.session.state.to_dict() if hasattr(ctx.session.state, 'to_dict') else ctx.session.state
-        logger.debug('State initialized successfully. Keys: %s', list(state_dict.keys()))
-      except (AttributeError, TypeError):
-        logger.debug('State initialized successfully (could not list keys)')
+        if hasattr(ctx.session.state, 'to_dict') and callable(getattr(ctx.session.state, 'to_dict', None)):
+          state_dict = ctx.session.state.to_dict()
+          if isinstance(state_dict, dict):
+            logger.debug('State initialized successfully. Keys: %s', list(state_dict.keys()))
+          else:
+            logger.debug('State initialized successfully (to_dict() returned non-dict: %s)', type(state_dict))
+        elif isinstance(ctx.session.state, dict):
+          logger.debug('State initialized successfully. Keys: %s', list(ctx.session.state.keys()))
+        else:
+          logger.debug('State initialized successfully (could not list keys - state is not dict-like)')
+      except (AttributeError, TypeError) as e:
+        logger.debug('State initialized successfully (could not list keys: %s)', e)
     except Exception as e:
       logger.error('Failed to initialize state: %s', e, exc_info=True)
       raise
@@ -229,40 +248,84 @@ class ThinkRemixWorkflowAgent(BaseAgent):
         return
 
     # Phase 3: Dynamic Persona Execution (Parallel)
-    async for event in self._run_persona_execution_phase(ctx, workflow_state):
-      yield event
-      if ctx.should_pause_invocation(event):
-        return
+    logger.info('>>> Starting Phase 3: Persona Execution')
+    try:
+      async for event in self._run_persona_execution_phase(ctx, workflow_state):
+        yield event
+        if ctx.should_pause_invocation(event):
+          logger.warning('Workflow paused during Phase 3')
+          return
+      logger.info('>>> Phase 3: Persona Execution COMPLETE')
+    except Exception as e:
+      logger.error('Phase 3 failed with error: %s', e, exc_info=True)
+      logger.warning('Continuing to Phase 4 despite Phase 3 error')
 
     # Phase 4: Analysis and Synthesis
-    async for event in self._run_analysis_phase(ctx, workflow_state):
-      yield event
-      if ctx.should_pause_invocation(event):
-        return
+    logger.info('>>> Starting Phase 4: Analysis and Synthesis')
+    try:
+      async for event in self._run_analysis_phase(ctx, workflow_state):
+        yield event
+        if ctx.should_pause_invocation(event):
+          logger.warning('Workflow paused during Phase 4')
+          return
+      logger.info('>>> Phase 4: Analysis and Synthesis COMPLETE')
+    except Exception as e:
+      logger.error('Phase 4 failed with error: %s', e, exc_info=True)
+      logger.warning('Continuing to Phase 5 despite Phase 4 error')
 
     # Phase 5: Targeted Research
-    async for event in self._run_research_phase(ctx, workflow_state):
-      yield event
-      if ctx.should_pause_invocation(event):
-        return
+    logger.info('>>> Starting Phase 5: Targeted Research')
+    try:
+      async for event in self._run_research_phase(ctx, workflow_state):
+        yield event
+        if ctx.should_pause_invocation(event):
+          logger.warning('Workflow paused during Phase 5')
+          return
+      logger.info('>>> Phase 5: Targeted Research COMPLETE')
+    except Exception as e:
+      logger.error('Phase 5 failed with error: %s', e, exc_info=True)
+      logger.warning('Continuing to Phase 6 despite Phase 5 error')
 
     # Phase 6: Adjudication and Case File
-    async for event in self._run_adjudication_phase(ctx, workflow_state):
-      yield event
-      if ctx.should_pause_invocation(event):
-        return
+    logger.info('>>> Starting Phase 6: Adjudication and Case File')
+    try:
+      async for event in self._run_adjudication_phase(ctx, workflow_state):
+        yield event
+        if ctx.should_pause_invocation(event):
+          logger.warning('Workflow paused during Phase 6')
+          return
+      logger.info('>>> Phase 6: Adjudication and Case File COMPLETE')
+    except Exception as e:
+      logger.error('Phase 6 failed with error: %s', e, exc_info=True)
+      logger.warning('Continuing to Phase 7 despite Phase 6 error')
 
     # Phase 7: Coverage Validation Loop
-    async for event in self._run_coverage_validation_phase(ctx, workflow_state):
-      yield event
-      if ctx.should_pause_invocation(event):
-        return
+    logger.info('>>> Starting Phase 7: Coverage Validation')
+    try:
+      async for event in self._run_coverage_validation_phase(ctx, workflow_state):
+        yield event
+        if ctx.should_pause_invocation(event):
+          logger.warning('Workflow paused during Phase 7')
+          return
+      logger.info('>>> Phase 7: Coverage Validation COMPLETE')
+    except Exception as e:
+      logger.error('Phase 7 failed with error: %s', e, exc_info=True)
+      logger.warning('Continuing to Phase 8 despite Phase 7 error')
 
     # Phase 8: Final Synthesis
-    async for event in self._run_final_phase(ctx, workflow_state):
-      yield event
-      if ctx.should_pause_invocation(event):
-        return
+    logger.info('>>> Starting Phase 8: Final Synthesis')
+    try:
+      async for event in self._run_final_phase(ctx, workflow_state):
+        yield event
+        if ctx.should_pause_invocation(event):
+          logger.warning('Workflow paused during Phase 8')
+          return
+      logger.info('>>> Phase 8: Final Synthesis COMPLETE')
+    except Exception as e:
+      logger.error('Phase 8 failed with error: %s', e, exc_info=True)
+      logger.warning('Workflow completed with errors in Phase 8')
+    
+    logger.info('=== THINK Remix v2.0 Workflow COMPLETE ===')
 
     if ctx.is_resumable:
       ctx.set_agent_state(self.name, end_of_agent=True)
@@ -376,15 +439,18 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     allocation_result = ctx.session.state.get('persona_allocation')
     if not allocation_result or not isinstance(allocation_result, dict) or 'personas' not in allocation_result:
       logger.error('No persona allocation found, cannot execute personas')
+      logger.warning('Workflow will continue but Phase 4 agents may fail without persona analyses')
       return
 
     personas = allocation_result['personas']
     if not isinstance(personas, list) or len(personas) == 0:
       logger.error('Invalid personas list in allocation result')
+      logger.warning('Workflow will continue but Phase 4 agents may fail without persona analyses')
       return
 
     # Get CER facts for persona agents
     cer_registry = ctx.session.state.get('cer_registry', [])
+    logger.info('Phase 3: Using %d CER facts for persona agents', len(cer_registry))
     
     # Dynamically create persona agents
     persona_agents = []
@@ -392,26 +458,33 @@ class ThinkRemixWorkflowAgent(BaseAgent):
       try:
         persona_agent = agent.create_persona_agent(persona_config, cer_registry)
         persona_agents.append(persona_agent)
+        logger.debug('Created persona agent: %s', persona_config.get('id', 'unknown'))
       except Exception as e:
         logger.error('Failed to create persona agent for %s: %s',
-                     persona_config.get('id', 'unknown'), e)
+                     persona_config.get('id', 'unknown'), e, exc_info=True)
         continue
 
     if not persona_agents:
       logger.error('No persona agents created successfully')
+      logger.warning('Workflow will continue but Phase 4 agents may fail without persona analyses')
       return
 
     logger.info('Created %d persona agents, executing in parallel', len(persona_agents))
 
     # Execute personas in parallel using ParallelAgent
-    parallel_persona_agent = ParallelAgent(
-        name='parallel_persona_execution',
-        sub_agents=persona_agents,
-    )
+    try:
+      parallel_persona_agent = ParallelAgent(
+          name='parallel_persona_execution',
+          sub_agents=persona_agents,
+      )
 
-    async with Aclosing(parallel_persona_agent.run_async(ctx)) as agen:
-      async for event in agen:
-        yield event
+      async with Aclosing(parallel_persona_agent.run_async(ctx)) as agen:
+        async for event in agen:
+          yield event
+    except Exception as e:
+      logger.error('Error executing persona agents in parallel: %s', e, exc_info=True)
+      logger.warning('Workflow will continue but Phase 4 agents may fail without persona analyses')
+      # Don't return - let workflow continue
     
     # Validate persona analyses were recorded
     persona_analyses = ctx.session.state.get('persona_analyses', [])
@@ -437,26 +510,60 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     logger.info('=== Phase 4: Analysis and Synthesis ===')
     workflow_state.phase = 'analysis'
     
+    # Check if persona analyses exist (required for synthesis/adversarial)
+    persona_analyses = ctx.session.state.get('persona_analyses', [])
+    logger.info('Phase 4: Found %d persona analyses in state', len(persona_analyses))
+    
+    if len(persona_analyses) == 0:
+      logger.warning(
+          'No persona analyses found! Phase 3 may have failed. '
+          'Checking for persona analysis output keys in state...'
+      )
+      # Check for persona analysis output keys
+      allocation_result = ctx.session.state.get('persona_allocation', {})
+      personas = allocation_result.get('personas', [])
+      found_outputs = 0
+      for persona_config in personas:
+        persona_id = persona_config.get('id')
+        if persona_id:
+          output_key = f'persona_analysis_{persona_id}'
+          if output_key in ctx.session.state:
+            found_outputs += 1
+            logger.info('Found persona analysis output key: %s', output_key)
+      if found_outputs == 0:
+        logger.error(
+            'No persona analyses found in any format! '
+            'Synthesis and adversarial agents may fail. Continuing anyway...'
+        )
+    
     # Evidence Consistency Enforcer
-    async for event in self._run_agent_with_validation(
-        agent.evidence_consistency_enforcer_agent, ctx
-    ):
-      yield event
+    try:
+      async for event in self._run_agent_with_validation(
+          agent.evidence_consistency_enforcer_agent, ctx
+      ):
+        yield event
+    except Exception as e:
+      logger.error('Error in evidence_consistency_enforcer: %s', e, exc_info=True)
+      # Continue workflow even if this fails
 
     # Run Synthesis and Adversarial in parallel
     # ParallelAgent handles branching internally, so we can use the same ctx
     # Note: Validation happens after parallel execution completes
-    parallel_analysis_agent = ParallelAgent(
-        name='parallel_synthesis_adversarial',
-        sub_agents=[
-            agent.synthesis_agent,
-            agent.adversarial_injector_agent,
-        ],
-    )
+    try:
+      parallel_analysis_agent = ParallelAgent(
+          name='parallel_synthesis_adversarial',
+          sub_agents=[
+              agent.synthesis_agent,
+              agent.adversarial_injector_agent,
+          ],
+      )
 
-    async with Aclosing(parallel_analysis_agent.run_async(ctx)) as agen:
-      async for event in agen:
-        yield event
+      async with Aclosing(parallel_analysis_agent.run_async(ctx)) as agen:
+        async for event in agen:
+          yield event
+    except Exception as e:
+      logger.error('Error in parallel synthesis/adversarial execution: %s', e, exc_info=True)
+      # Continue workflow even if parallel execution fails
     
     # Validate parallel agent outputs
     for sub_agent in [agent.synthesis_agent, agent.adversarial_injector_agent]:
@@ -481,16 +588,26 @@ class ThinkRemixWorkflowAgent(BaseAgent):
                       sub_agent.name, output_key)
 
     # Analyze Disagreement
-    async for event in self._run_agent_with_validation(
-        agent.analyze_disagreement_agent, ctx
-    ):
-      yield event
+    try:
+      async for event in self._run_agent_with_validation(
+          agent.analyze_disagreement_agent, ctx
+      ):
+        yield event
+    except Exception as e:
+      logger.error('Error in analyze_disagreement: %s', e, exc_info=True)
+      # Continue workflow even if this fails
 
     # Analyze Blindspots
-    async for event in self._run_agent_with_validation(
-        agent.analyze_blindspots_agent, ctx
-    ):
-      yield event
+    try:
+      async for event in self._run_agent_with_validation(
+          agent.analyze_blindspots_agent, ctx
+      ):
+        yield event
+    except Exception as e:
+      logger.error('Error in analyze_blindspots: %s', e, exc_info=True)
+      # Continue workflow even if this fails
+    
+    logger.info('=== Phase 4: Analysis and Synthesis COMPLETE ===')
 
   async def _run_research_phase(
       self,
