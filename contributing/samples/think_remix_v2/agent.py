@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from textwrap import dedent
 from typing import Any
@@ -35,6 +36,8 @@ from .state_manager import StateManager
 from .state_manager import initialize_state
 from .state_manager import initialize_state_mapping
 from .workflow_agent import ThinkRemixWorkflowAgent
+
+logger = logging.getLogger(__name__)
 
 
 def _get_source_credibility_scores() -> dict[str, float]:
@@ -96,7 +99,8 @@ def _get_search_tool():
   config = get_config()
   provider = config.search_provider.lower()
   
-  if provider == 'perplexity':
+  if provider == 'brave' or provider == 'perplexity':
+    # Both use the same tool (backward compatibility)
     return perplexity_search_tool
   else:
     # Default to Google Search
@@ -147,44 +151,93 @@ def register_evidence(
     analyst: Optional[str] = None,
 ) -> dict[str, Any]:
   """Registers evidence in the Central Evidence Registry with structured output."""
-  initialize_state(tool_context)
-  manager = StateManager(tool_context)
+  try:
+    # Log state before initialization for debugging
+    logger.debug('register_evidence called - checking state keys: %s',
+                list(tool_context.state.keys()) if hasattr(tool_context, 'state') else 'no state')
+    
+    # Initialize state with enhanced error handling
+    try:
+      initialize_state(tool_context)
+    except TypeError as te:
+      logger.error('State initialization failed in register_evidence: %s', te, exc_info=True)
+      # Try to fix common state issues
+      if 'null_hypotheses' in str(te):
+        logger.warning('Attempting to fix null_hypotheses state issue')
+        # Ensure null_hypotheses is a list
+        if 'null_hypotheses' in tool_context.state and not isinstance(tool_context.state['null_hypotheses'], list):
+          logger.warning('Converting null_hypotheses from %s to list',
+                        type(tool_context.state['null_hypotheses']))
+          # If it's a dict with 'null_hypotheses' key, extract the list
+          if isinstance(tool_context.state['null_hypotheses'], dict):
+            if 'null_hypotheses' in tool_context.state['null_hypotheses']:
+              tool_context.state['null_hypotheses'] = tool_context.state['null_hypotheses']['null_hypotheses']
+            else:
+              tool_context.state['null_hypotheses'] = []
+          else:
+            tool_context.state['null_hypotheses'] = []
+        # Retry initialization
+        initialize_state(tool_context)
+    
+    manager = StateManager(tool_context)
+    
+    logger.debug('StateManager created, CER registry size: %d', len(manager.cer_registry))
 
-  normalized_source_type = _normalize_source_type(source_type)
-  date_token = (date_accessed or datetime.utcnow().strftime('%Y%m%d')).strip()
-  fact_id = manager.next_fact_id(date_token)
+    normalized_source_type = _normalize_source_type(source_type)
+    date_token = (date_accessed or datetime.utcnow().strftime('%Y%m%d')).strip()
+    fact_id = manager.next_fact_id(date_token)
 
-  base_score = SOURCE_CREDIBILITY_SCORES.get(normalized_source_type, 0.55)
-  if credibility_override is not None:
-    credibility = max(0.0, min(1.0, float(credibility_override)))
-  else:
-    credibility = base_score
+    base_score = SOURCE_CREDIBILITY_SCORES.get(normalized_source_type, 0.55)
+    if credibility_override is not None:
+      credibility = max(0.0, min(1.0, float(credibility_override)))
+    else:
+      credibility = base_score
 
-  metadata: dict[str, Any] = {}
-  if research_track:
-    metadata['research_track'] = research_track
-  if analyst:
-    metadata['registered_by'] = analyst
+    metadata: dict[str, Any] = {}
+    if research_track:
+      metadata['research_track'] = research_track
+    if analyst:
+      metadata['registered_by'] = analyst
 
-  stored = manager.register_fact(
-      fact_id=fact_id,
-      statement=statement.strip(),
-      source=source.strip(),
-      source_type=normalized_source_type,
-      credibility_score=credibility,
-      date_accessed=date_token,
-      metadata=metadata or None,
-  )
+    stored = manager.register_fact(
+        fact_id=fact_id,
+        statement=statement.strip(),
+        source=source.strip(),
+        source_type=normalized_source_type,
+        credibility_score=credibility,
+        date_accessed=date_token,
+        metadata=metadata or None,
+    )
 
-  manager.append_audit_event(
-      {
-          'event': 'register_evidence',
-          'fact_id': fact_id,
-          'source_type': normalized_source_type,
-          'credibility_score': stored['credibility_score'],
-      }
-  )
-  return stored
+    manager.append_audit_event(
+        {
+            'event': 'register_evidence',
+            'fact_id': fact_id,
+            'source_type': normalized_source_type,
+            'credibility_score': stored['credibility_score'],
+        }
+    )
+    
+    logger.info('Successfully registered evidence: %s (credibility: %.2f)',
+                fact_id, stored['credibility_score'])
+    
+    return stored
+  except Exception as e:
+    logger.error('Error in register_evidence: %s', e, exc_info=True)
+    # Log detailed state information for debugging
+    try:
+      state_info = {k: type(v).__name__ for k, v in tool_context.state.items()}
+      logger.error('State types at error: %s', state_info)
+    except Exception:
+      logger.error('Could not log state information')
+    
+    # Return a valid response even on error so workflow can continue
+    return {
+        'fact_id': 'ERROR',
+        'statement': statement[:100] if statement else 'N/A',
+        'error': str(e),
+        'status': 'failed',
+    }
 
 
 async def _bootstrap_workflow_state(
@@ -573,8 +626,10 @@ def _build_gather_insights_instruction() -> str:
       every distinct factual claim into the Central Evidence Registry (CER).
 
       EXPECTATIONS:
-      - Perform iterative search (minimum 5 queries) exploring heterogeneous
+      - Perform iterative search (2-3 queries minimum) exploring heterogeneous
         sources (academic, industry, institutional, investigative).
+      - IMPORTANT: Due to API rate limits, space out your search queries.
+        The system will automatically handle rate limiting, but be patient.
       - For every distinct factual statement:
         1. Extract verbatim claim (no paraphrase).
         2. Record source URL and publication metadata.
@@ -749,6 +804,8 @@ def _build_null_adjudicator_instruction() -> str:
       hypothesis using evidence strength and consensus.
 
       INPUT:
+      - Access null hypotheses from the generate_null_hypotheses agent output
+        (key: "null_hypotheses_result") in conversation history or state.
       - Access persona analyses from previous agent outputs (look for outputs with keys
         like "persona_analysis_a", "persona_analysis_b", etc.) or from conversation history.
       - Each persona analysis should contain null_hypothesis_assessment sections.
@@ -798,8 +855,10 @@ def _build_conduct_research_instruction() -> str:
 
       MANDATE:
       - For every objective run two tracks:
-        Track 1: Confirmatory evidence supporting resolution.
-        Track 2: Disconfirmatory evidence challenging consensus.
+        Track 1: Confirmatory evidence supporting resolution (1-2 searches).
+        Track 2: Disconfirmatory evidence challenging consensus (1-2 searches).
+      - IMPORTANT: Keep searches focused due to API rate limits.
+        The system automatically handles rate limiting between requests.
       - Each finding must register via register_evidence with research_track tag.
       - Report disconfirmatory_ratio (facts tagged disconfirmatory ÷ total).
       """
@@ -924,6 +983,8 @@ def _build_case_file_instruction() -> str:
       disagreements, uncertainties, and directives for the arbiter.
 
       INPUT:
+      - Access null hypotheses from null_hypotheses_result (key: "null_hypotheses_result")
+        in conversation history or state.
       - Access gather_insights_result, disagreement_analysis, blindspot_analysis,
         and evidence_adjudication from previous agent outputs in conversation history.
 
@@ -1231,7 +1292,7 @@ generate_nulls_agent = Agent(
     model='gemini-2.5-flash',
     instruction=_build_generate_nulls_instruction(),
     description='Generates skeptical null hypotheses for falsification testing.',
-    output_key='null_hypotheses',
+    output_key='null_hypotheses_result',
 )
 
 gather_insights_agent = Agent(

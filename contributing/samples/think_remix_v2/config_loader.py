@@ -62,11 +62,13 @@ DEFAULT_CONFIG = {
             'tertiary': 0.55,
         },
         'search': {
-            'provider': 'perplexity',
+            'provider': 'brave',
+            'brave': {
+                'count': 10,
+            },
             'perplexity': {
-                'model': 'llama-3.1-sonar-large-128k-online',
                 'max_results': 10,
-                'temperature': 0.2,
+                'max_tokens_per_page': 1024,
             },
             'google': {
                 'num_results': 10,
@@ -236,16 +238,22 @@ class Config:
   
   @property
   def search_provider(self) -> str:
-    """Search provider: 'google' or 'perplexity'."""
-    return self.get('workflow.search.provider', 'perplexity')
+    """Search provider: 'google', 'brave', or 'perplexity'."""
+    return self.get('workflow.search.provider', 'brave')
+  
+  @property
+  def brave_config(self) -> dict[str, Any]:
+    """Brave Search API configuration."""
+    return self.get('workflow.search.brave', {
+        'count': 10,
+    })
   
   @property
   def perplexity_config(self) -> dict[str, Any]:
-    """Perplexity API configuration."""
+    """Perplexity Search API configuration."""
     return self.get('workflow.search.perplexity', {
-        'model': 'llama-3.1-sonar-large-128k-online',
         'max_results': 10,
-        'temperature': 0.2,
+        'max_tokens_per_page': 1024,
     })
 
 

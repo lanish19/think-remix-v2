@@ -115,7 +115,7 @@ class ThinkRemixWorkflowAgent(BaseAgent):
         break
       
       # Try to get output from state first (ADK stores it there)
-      agent_output = ctx.state.get(output_key)
+      agent_output = ctx.session.state.get(output_key)
       output_text = None
       
       if agent_output is not None:
@@ -163,7 +163,7 @@ class ThinkRemixWorkflowAgent(BaseAgent):
             'Output ONLY valid JSON matching the schema - no markdown, no preamble, no commentary.'
         )
         # Store error in state so agent can access it
-        ctx.state[f'{output_key}_validation_error'] = error_context
+        ctx.session.state[f'{output_key}_validation_error'] = error_context
         # Add validation error to the conversation so agent sees it on retry
         # The agent will see this in its conversation history
         if hasattr(ctx, 'session') and ctx.session:
@@ -192,13 +192,24 @@ class ThinkRemixWorkflowAgent(BaseAgent):
       self, ctx: InvocationContext
   ) -> AsyncGenerator[Event, None]:
     """Execute the THINK Remix workflow with conditional branching."""
-    initialize_state_mapping(ctx.state)
+    logger.info('Starting THINK Remix v2.0 workflow')
+    
+    # Initialize state with error handling
+    try:
+      initialize_state_mapping(ctx.session.state)
+      logger.debug('State initialized successfully. Keys: %s', list(ctx.session.state.keys()))
+    except Exception as e:
+      logger.error('Failed to initialize state: %s', e, exc_info=True)
+      raise
+    
     workflow_state = self._load_agent_state(ctx, ThinkRemixWorkflowState)
     if workflow_state is None:
       workflow_state = ThinkRemixWorkflowState()
       ctx.set_agent_state(self.name, agent_state=workflow_state)
       if ctx.is_resumable:
         yield self._create_agent_state_event(ctx)
+    
+    logger.info('Workflow state loaded: phase=%s', workflow_state.phase)
 
     # Phase 1: Question Processing
     async for event in self._run_question_processing_phase(ctx, workflow_state):
@@ -258,6 +269,7 @@ class ThinkRemixWorkflowAgent(BaseAgent):
       workflow_state: ThinkRemixWorkflowState,
   ) -> AsyncGenerator[Event, None]:
     """Phase 1: Question audit, analysis, null generation, and initial research."""
+    logger.info('=== Phase 1: Question Processing ===')
     workflow_state.phase = 'question_processing'
     
     # Question Audit Gate
@@ -267,8 +279,8 @@ class ThinkRemixWorkflowAgent(BaseAgent):
       yield event
 
     # Check audit result and branch
-    audit_result = ctx.state.get('question_audit_result')
-    if audit_result:
+    audit_result = ctx.session.state.get('question_audit_result')
+    if audit_result and isinstance(audit_result, dict):
       audit_status = audit_result.get('audit_status', '').lower()
       if audit_status == 'block':
         # Workflow stops - audit gate callback should have handled this
@@ -294,6 +306,12 @@ class ThinkRemixWorkflowAgent(BaseAgent):
         agent.gather_insights_agent, ctx
     ):
       yield event
+    
+    # Validate CER facts were registered
+    cer_registry = ctx.session.state.get('cer_registry', [])
+    logger.info('After gather_insights: CER registry contains %d facts', len(cer_registry))
+    if len(cer_registry) == 0:
+      logger.warning('No CER facts registered during gather_insights phase!')
 
   async def _run_persona_allocation_phase(
       self,
@@ -301,6 +319,7 @@ class ThinkRemixWorkflowAgent(BaseAgent):
       workflow_state: ThinkRemixWorkflowState,
   ) -> AsyncGenerator[Event, None]:
     """Phase 2: Persona allocation with validation loop."""
+    logger.info('=== Phase 2: Persona Allocation ===')
     workflow_state.phase = 'persona_allocation'
     max_attempts = self._config.max_persona_validator_attempts
 
@@ -320,8 +339,8 @@ class ThinkRemixWorkflowAgent(BaseAgent):
         yield event
 
       # Check validation result
-      validation_result = ctx.state.get('persona_validation')
-      if validation_result:
+      validation_result = ctx.session.state.get('persona_validation')
+      if validation_result and isinstance(validation_result, dict):
         validation_status = validation_result.get('validation_status', '').lower()
         if validation_status == 'approved':
           logger.info('Persona validation approved after %d attempts',
@@ -345,11 +364,12 @@ class ThinkRemixWorkflowAgent(BaseAgent):
       workflow_state: ThinkRemixWorkflowState,
   ) -> AsyncGenerator[Event, None]:
     """Phase 3: Dynamically create and execute persona agents in parallel."""
+    logger.info('=== Phase 3: Persona Execution ===')
     workflow_state.phase = 'persona_execution'
     
     # Get persona allocation result
-    allocation_result = ctx.state.get('persona_allocation')
-    if not allocation_result or 'personas' not in allocation_result:
+    allocation_result = ctx.session.state.get('persona_allocation')
+    if not allocation_result or not isinstance(allocation_result, dict) or 'personas' not in allocation_result:
       logger.error('No persona allocation found, cannot execute personas')
       return
 
@@ -359,7 +379,7 @@ class ThinkRemixWorkflowAgent(BaseAgent):
       return
 
     # Get CER facts for persona agents
-    cer_registry = ctx.state.get('cer_registry', [])
+    cer_registry = ctx.session.state.get('cer_registry', [])
     
     # Dynamically create persona agents
     persona_agents = []
@@ -387,6 +407,21 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     async with Aclosing(parallel_persona_agent.run_async(ctx)) as agen:
       async for event in agen:
         yield event
+    
+    # Validate persona analyses were recorded
+    persona_analyses = ctx.session.state.get('persona_analyses', [])
+    logger.info('After persona execution: %d persona analyses recorded', len(persona_analyses))
+    if len(persona_analyses) == 0:
+      logger.warning('No persona analyses recorded! Expected %d analyses', len(persona_agents))
+    
+    # Also check for persona analysis output keys in state
+    for persona_config in personas:
+      persona_id = persona_config.get('id')
+      output_key = f'persona_analysis_{persona_id}'
+      if output_key in ctx.session.state:
+        logger.debug('Found persona analysis in state: %s', output_key)
+      else:
+        logger.warning('Missing persona analysis in state: %s', output_key)
 
   async def _run_analysis_phase(
       self,
@@ -394,6 +429,7 @@ class ThinkRemixWorkflowAgent(BaseAgent):
       workflow_state: ThinkRemixWorkflowState,
   ) -> AsyncGenerator[Event, None]:
     """Phase 4: Evidence consistency, synthesis, adversarial, disagreement analysis."""
+    logger.info('=== Phase 4: Analysis and Synthesis ===')
     workflow_state.phase = 'analysis'
     
     # Evidence Consistency Enforcer
@@ -421,7 +457,7 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     for sub_agent in [agent.synthesis_agent, agent.adversarial_injector_agent]:
       output_key = getattr(sub_agent, 'output_key', None)
       if output_key:
-        output = ctx.state.get(output_key)
+        output = ctx.session.state.get(output_key)
         if output:
           if isinstance(output, dict):
             output_text = json.dumps(output)
@@ -457,6 +493,7 @@ class ThinkRemixWorkflowAgent(BaseAgent):
       workflow_state: ThinkRemixWorkflowState,
   ) -> AsyncGenerator[Event, None]:
     """Phase 5: Search inquiry strategist and targeted research."""
+    logger.info('=== Phase 5: Targeted Research ===')
     workflow_state.phase = 'research'
     
     # Search Inquiry Strategist
@@ -470,6 +507,10 @@ class ThinkRemixWorkflowAgent(BaseAgent):
         agent.conduct_research_agent, ctx
     ):
       yield event
+    
+    # Validate additional CER facts were registered
+    cer_registry = ctx.session.state.get('cer_registry', [])
+    logger.info('After conduct_research: CER registry contains %d facts', len(cer_registry))
 
   async def _run_adjudication_phase(
       self,
@@ -477,6 +518,7 @@ class ThinkRemixWorkflowAgent(BaseAgent):
       workflow_state: ThinkRemixWorkflowState,
   ) -> AsyncGenerator[Event, None]:
     """Phase 6: Evidence adjudication, null adjudication, and case file creation."""
+    logger.info('=== Phase 6: Adjudication and Case File ===')
     workflow_state.phase = 'adjudication'
     
     # Run Evidence Adjudicator and Null Adjudicator in parallel
@@ -496,7 +538,7 @@ class ThinkRemixWorkflowAgent(BaseAgent):
     for sub_agent in [agent.evidence_adjudicator_agent, agent.null_adjudicator_agent]:
       output_key = getattr(sub_agent, 'output_key', None)
       if output_key:
-        output = ctx.state.get(output_key)
+        output = ctx.session.state.get(output_key)
         if output:
           if isinstance(output, dict):
             output_text = json.dumps(output)
@@ -526,6 +568,7 @@ class ThinkRemixWorkflowAgent(BaseAgent):
       workflow_state: ThinkRemixWorkflowState,
   ) -> AsyncGenerator[Event, None]:
     """Phase 7: Coverage validation loop (regenerate case file if needed)."""
+    logger.info('=== Phase 7: Coverage Validation ===')
     workflow_state.phase = 'coverage_validation'
     max_attempts = self._config.max_coverage_validator_attempts
 
@@ -539,8 +582,8 @@ class ThinkRemixWorkflowAgent(BaseAgent):
         yield event
 
       # Check validation result
-      validation_result = ctx.state.get('coverage_validation')
-      if validation_result:
+      validation_result = ctx.session.state.get('coverage_validation')
+      if validation_result and isinstance(validation_result, dict):
         passed = validation_result.get('passed', False)
         if passed:
           logger.info('Coverage validation passed after %d attempts',
@@ -569,6 +612,7 @@ class ThinkRemixWorkflowAgent(BaseAgent):
       workflow_state: ThinkRemixWorkflowState,
   ) -> AsyncGenerator[Event, None]:
     """Phase 8: Robustness calculation, QA, and final arbiter."""
+    logger.info('=== Phase 8: Final Synthesis ===')
     workflow_state.phase = 'final'
     
     # Robustness Calculator
