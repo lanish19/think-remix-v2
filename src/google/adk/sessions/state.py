@@ -79,3 +79,26 @@ class State:
     result.update(self._value)
     result.update(self._delta)
     return result
+
+  # The methods below provide a minimal mapping interface so State behaves like
+  # a regular dict when libraries expect mapping-style helpers such as keys().
+
+  def keys(self):
+    """Returns a dynamic view of the state keys."""
+    return self.to_dict().keys()
+
+  def items(self):
+    """Returns a dynamic view of the state items."""
+    return self.to_dict().items()
+
+  def values(self):
+    """Returns a dynamic view of the state values."""
+    return self.to_dict().values()
+
+  def __iter__(self):
+    """Iterates over keys in the combined state."""
+    return iter(self.to_dict())
+
+  def __len__(self) -> int:
+    """Returns the number of keys in the combined state."""
+    return len(self.to_dict())

@@ -34,16 +34,38 @@ def decode_model(
 
 
 def extract_state_delta(
-    state: dict[str, Any],
+    state: dict[str, Any] | Any,
 ) -> dict[str, dict[str, Any]]:
-  """Extracts app, user, and session state deltas from a state dictionary."""
-  deltas = {"app": {}, "user": {}, "session": {}}
-  if state:
-    for key in state.keys():
-      if key.startswith(State.APP_PREFIX):
-        deltas["app"][key.removeprefix(State.APP_PREFIX)] = state[key]
-      elif key.startswith(State.USER_PREFIX):
-        deltas["user"][key.removeprefix(State.USER_PREFIX)] = state[key]
-      elif not key.startswith(State.TEMP_PREFIX):
-        deltas["session"][key] = state[key]
+  """Extracts app, user, and session state deltas from a state-like object.
+
+  Accepts either a plain dict or an ADK State object. Never calls .keys()
+  on the State object directly; converts to a dict first.
+  """
+  deltas: dict[str, dict[str, Any]] = {"app": {}, "user": {}, "session": {}}
+  if not state:
+    return deltas
+
+  # Convert State -> dict safely
+  data: dict[str, Any] | None = None
+  try:
+    if hasattr(state, "to_dict") and callable(getattr(state, "to_dict", None)):
+      maybe_dict = state.to_dict()
+      if isinstance(maybe_dict, dict):
+        data = maybe_dict
+    elif isinstance(state, dict):
+      data = state
+  except Exception:
+    # Fall through to empty deltas on failure
+    data = None
+
+  if not data:
+    return deltas
+
+  for key, value in data.items():
+    if key.startswith(State.APP_PREFIX):
+      deltas["app"][key.removeprefix(State.APP_PREFIX)] = value
+    elif key.startswith(State.USER_PREFIX):
+      deltas["user"][key.removeprefix(State.USER_PREFIX)] = value
+    elif not key.startswith(State.TEMP_PREFIX):
+      deltas["session"][key] = value
   return deltas
