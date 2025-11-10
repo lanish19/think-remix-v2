@@ -66,14 +66,17 @@ workflow:
     tertiary: 0.55
 
   search:
-    # Search provider: 'google' or 'perplexity'
-    provider: 'perplexity'
+    # Search provider: 'google', 'brave', or 'perplexity'
+    provider: 'brave'
     
-    # Perplexity-specific settings
+    # Brave Search API settings
+    brave:
+      count: 10  # Number of results to return (1-20)
+    
+    # Perplexity-specific settings (using Search API)
     perplexity:
-      model: 'llama-3.1-sonar-large-128k-online'
       max_results: 10
-      temperature: 0.2
+      max_tokens_per_page: 1024  # Controls content extraction depth (256-2048)
     
     # Google Search settings (if using Google)
     google:

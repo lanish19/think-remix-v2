@@ -20,6 +20,7 @@ DEFAULT_STATE_SNAPSHOT = {
     'cer_daily_sequences': {},
     'persona_analyses': [],
     'null_hypotheses': [],
+    'null_hypotheses_result': {},
     'research_objectives': [],
     'adjudications': {},
     'workflow_audit_trail': [],
@@ -39,8 +40,12 @@ def _initialize_mapping(state: MutableMapping[str, Any]) -> None:
     raise TypeError('Expected cer_registry to be a list.')
   if not isinstance(state['persona_analyses'], list):
     raise TypeError('Expected persona_analyses to be a list.')
+  # null_hypotheses should be a list for internal state management
   if not isinstance(state['null_hypotheses'], list):
-    raise TypeError('Expected null_hypotheses to be a list.')
+    raise TypeError(f'Expected null_hypotheses to be a list, got {type(state["null_hypotheses"])}')
+  # null_hypotheses_result is the agent output dict
+  if not isinstance(state['null_hypotheses_result'], dict):
+    raise TypeError(f'Expected null_hypotheses_result to be a dict, got {type(state["null_hypotheses_result"])}')
 
 
 def initialize_state_mapping(state: MutableMapping[str, Any]) -> None:
