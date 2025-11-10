@@ -12,7 +12,11 @@ from pydantic import Field
 
 
 class ImmutableModel(BaseModel):
-  """Base model with common configuration."""
+  """Base Pydantic model with immutable configuration.
+
+  All workflow schemas inherit from this base to ensure data immutability
+  and allow extra fields for forward compatibility.
+  """
 
   model_config = ConfigDict(
       frozen=True,

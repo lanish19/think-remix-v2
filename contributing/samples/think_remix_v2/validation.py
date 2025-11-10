@@ -125,7 +125,7 @@ def validate_agent_output(
         raw_output=raw_output,
     )
     
-  except Exception as e:
+  except (TypeError, AttributeError) as e:
     logger.error('Unexpected error during validation for agent %s: %s', agent_name, e)
     return ValidationResult(
         valid=False,

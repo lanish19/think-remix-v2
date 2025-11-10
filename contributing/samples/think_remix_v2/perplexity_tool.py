@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import Any
 
@@ -29,7 +30,8 @@ from .config_loader import get_config
 
 logger = logging.getLogger(__name__)
 
-# Rate limiting state (simple in-memory tracking)
+# Rate limiting state (thread-safe)
+_rate_limit_lock = threading.Lock()
 _last_request_time = 0.0
 _rate_limit_delay = 1.1  # Seconds between requests (slightly more than 1s for safety)
 
@@ -56,9 +58,9 @@ def brave_search(
     config_count = brave_config.get('count', max_results)
     if config_count != 10:
       max_results = config_count
-  except Exception:
+  except (AttributeError, KeyError, TypeError) as e:
     # If config loading fails, use function defaults
-    pass
+    logger.warning('Failed to load search config, using defaults: %s', e)
   
   api_key = os.getenv('BRAVE_API_KEY')
   if not api_key:
@@ -82,17 +84,19 @@ def brave_search(
       'count': count,
   }
   
-  # Rate limiting: Ensure we don't exceed 1 request per second
+  # Rate limiting: Ensure we don't exceed 1 request per second (thread-safe)
   global _last_request_time  # pylint: disable=global-statement
-  current_time = time.time()
-  time_since_last = current_time - _last_request_time
   
-  if time_since_last < _rate_limit_delay:
-    sleep_time = _rate_limit_delay - time_since_last
-    logger.info('Rate limiting: sleeping %.2f seconds before Brave API request', sleep_time)
-    time.sleep(sleep_time)
-  
-  _last_request_time = time.time()
+  with _rate_limit_lock:
+    current_time = time.time()
+    time_since_last = current_time - _last_request_time
+    
+    if time_since_last < _rate_limit_delay:
+      sleep_time = _rate_limit_delay - time_since_last
+      logger.info('Rate limiting: sleeping %.2f seconds before Brave API request', sleep_time)
+      time.sleep(sleep_time)
+    
+    _last_request_time = time.time()
   
   try:
     response = requests.get(
@@ -122,11 +126,11 @@ def brave_search(
               f'Brave API rate limit exceeded: {detail}. '
               f'Please wait before retrying. Free plan allows 1 request per second.'
           )
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as exc:
           raise ValueError(
-              f'Brave API rate limit exceeded (429). '
-              f'Please wait before retrying. Free plan allows 1 request per second.'
-          )
+              'Brave API rate limit exceeded (429). '
+              'Please wait before retrying. Free plan allows 1 request per second.'
+          ) from exc
       
       raise ValueError(
           f'Brave API request failed with status {response.status_code}: {error_detail}'
