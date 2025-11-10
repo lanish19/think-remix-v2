@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import MutableMapping
+import copy
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
@@ -11,10 +12,33 @@ from pathlib import Path
 from typing import Any
 from typing import Iterable
 from typing import Optional
+from typing import TypedDict
 
 from google.adk.tools.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
+
+
+class CERFact(TypedDict, total=False):
+  """Type definition for a CER fact entry."""
+  fact_id: str
+  statement: str
+  source: str
+  source_type: str
+  credibility_score: float
+  date_accessed: str
+  registered_at: str
+  metadata: Optional[dict[str, Any]]
+
+
+class AuditEvent(TypedDict, total=False):
+  """Type definition for an audit event."""
+  timestamp: str
+  event: str
+  fact_id: str
+  source_type: str
+  credibility_score: float
+  persona_id: str
 
 
 DEFAULT_STATE_SNAPSHOT = {
@@ -30,11 +54,10 @@ DEFAULT_STATE_SNAPSHOT = {
 }
 
 
-def _initialize_mapping(state: MutableMapping[str, Any]) -> None:
-  # Handle State objects that don't support .items() or .keys() directly
-  # State objects support dict-like access but may not have all dict methods
+def _get_state_keys_safely(state: MutableMapping[str, Any]) -> set[str]:
+  """Safely get keys from State object or dict."""
   state_keys = set()
-  
+
   # Try to get keys via to_dict() - works for State objects
   try:
     if hasattr(state, 'to_dict'):
@@ -47,7 +70,7 @@ def _initialize_mapping(state: MutableMapping[str, Any]) -> None:
   except (AttributeError, TypeError):
     # If to_dict() or keys() fails, fall through to fallback
     pass
-  
+
   # Fallback: build state_keys using 'in' operator (safest method)
   # This works for both dicts and State objects
   if not state_keys:
@@ -58,19 +81,25 @@ def _initialize_mapping(state: MutableMapping[str, Any]) -> None:
       except (AttributeError, TypeError):
         # Skip this key if we can't check it
         continue
-  
-  for key, default_value in DEFAULT_STATE_SNAPSHOT.items():
-    if key not in state_keys:
-      state[key] = (
-          default_value.copy()
-          if isinstance(default_value, (dict, list))
-          else default_value
-      )
 
+  return state_keys
+
+
+def _validate_existing_state_types(state: MutableMapping[str, Any], keys: set[str]) -> None:
+  """Validate types of existing state keys before modification."""
+  if 'cer_registry' in keys and not isinstance(state['cer_registry'], list):
+    raise TypeError('Existing cer_registry must be a list')
+  if 'persona_analyses' in keys and not isinstance(state['persona_analyses'], list):
+    raise TypeError('Existing persona_analyses must be a list')
+
+
+def _validate_state_types(state: MutableMapping[str, Any]) -> None:
+  """Validate all state types after initialization."""
   if not isinstance(state['cer_registry'], list):
     raise TypeError('Expected cer_registry to be a list.')
   if not isinstance(state['persona_analyses'], list):
     raise TypeError('Expected persona_analyses to be a list.')
+
   # null_hypotheses should be a list for internal state management
   if not isinstance(state['null_hypotheses'], list):
     # Handle dict case explicitly (agent output may be dict)
@@ -82,9 +111,34 @@ def _initialize_mapping(state: MutableMapping[str, Any]) -> None:
     else:
       state['null_hypotheses'] = []
     logger.warning('Converted null_hypotheses from non-list type to list')
+
   # null_hypotheses_result is the agent output dict
   if not isinstance(state['null_hypotheses_result'], dict):
-    raise TypeError(f'Expected null_hypotheses_result to be a dict, got {type(state["null_hypotheses_result"])}')
+    raise TypeError(
+        f'Expected null_hypotheses_result to be a dict, '
+        f'got {type(state["null_hypotheses_result"])}'
+    )
+
+
+def _initialize_mapping(state: MutableMapping[str, Any]) -> None:
+  """Initialize state with proper type validation and deep copies."""
+  # Get existing keys safely
+  state_keys = _get_state_keys_safely(state)
+
+  # Validate existing state types BEFORE modifying
+  _validate_existing_state_types(state, state_keys)
+
+  # Initialize missing keys with deep copies
+  for key, default_value in DEFAULT_STATE_SNAPSHOT.items():
+    if key not in state_keys:
+      state[key] = (
+          copy.deepcopy(default_value)
+          if isinstance(default_value, (dict, list))
+          else default_value
+      )
+
+  # Final type validation
+  _validate_state_types(state)
 
 
 def initialize_state_mapping(state: MutableMapping[str, Any]) -> None:
@@ -187,13 +241,24 @@ class StateManager:
   def load_state(self, filepath: str | Path) -> None:
     """Loads workflow state from disk."""
     path = Path(filepath)
-    data = json.loads(path.read_text(encoding='utf-8'))
+    try:
+      data = json.loads(path.read_text(encoding='utf-8'))
+    except json.JSONDecodeError as e:
+      logger.error('Invalid JSON in state file %s: %s', path, e)
+      raise ValueError(f'Invalid JSON in state file: {e}') from e
+    except FileNotFoundError:
+      logger.error('State file not found: %s', path)
+      raise
+    except Exception as e:
+      logger.error('Error loading state file %s: %s', path, e)
+      raise
+
     for key, default_value in DEFAULT_STATE_SNAPSHOT.items():
       if key in data:
         self.tool_context.state[key] = data[key]
       elif key not in self.tool_context.state:
         self.tool_context.state[key] = (
-            default_value.copy()
+            copy.deepcopy(default_value)
             if isinstance(default_value, (dict, list))
             else default_value
         )
